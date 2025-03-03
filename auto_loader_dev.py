@@ -11,9 +11,21 @@ import re
 import signal
 import threading
 import time
+import sys
 
 import psycopg2
 import requests
+from pyautogui import FailSafeException
+
+import auto_input.autoscope
+import auto_input.xcope
+import config_dev as config
+import scan.scanner
+import tray_task.tray_task
+from hospital_info import data_processing
+from utils import http_request
+from utils import logger  # 导入新的日志模块
+from window.prompt_dialog_box import error_window
 
 # 使用开发环境配置
 try:
@@ -93,281 +105,240 @@ def check_end_mark():
     """
     检测是否忘记设置结束符，由于结束符在打印的时候也看不到，所以需要认真查看
     """
-    scanner = DevScanner(config.SERIAL_PORT, config.BAUDRATE)
-    data = scanner.get_scanner_content()
+    logger.info("开始检查扫描器结束符设置")
+    qr_code_scanner = scan.scanner.Scanner(config.SERIAL_PORT, config.BAUDRATE)
+    data = qr_code_scanner.get_scanner_content()
     match data:
         case "扫描器设置完成测试":
             print("设置成功")
+            logger.info("扫描器结束符设置正确")
         case "扫描器设置完成测试\r":
             print(f"缺少设置没有结束符号,原始数据为:{repr(data)}")
+            logger.warning(f"扫描器缺少结束符设置，原始数据为:{repr(data)}")
         case _:
             print(f"没有匹配到任何参数,原始数据为:{repr(data)}")
+            logger.warning(f"扫描器设置检查异常，未匹配到预期内容，原始数据为:{repr(data)}")
 
 def is_tj_starting(string):
     pattern = r"^TJ"
     return bool(re.match(pattern, string))
 
+@logger.log_function_call()  # 使用日志装饰器记录函数调用
 def main():
-    # 托盘栏 - 开发模式下简化实现
-    tray = DevTrayTask()
-    tray.setup_systray()
+    # 初始化日志系统
+    logger.setup_logging(
+        log_level=logger.LOG_LEVEL_DEBUG,  # 开发版使用DEBUG级别
+        log_file_prefix="autoloader_dev",
+        max_bytes=10*1024*1024,  # 10MB
+        backup_count=5,
+        console_output=True  # 开发版输出到控制台
+    )
     
-    # 连接扫描器 - 开发模式下使用模拟扫描器
-    qr_code_scanner = DevScanner(config.SERIAL_PORT, config.BAUDRATE)
+    logger.info("===== AutoLoader 程序启动 =====")
+    logger.info(f"运行环境: 开发模式 (DEV_MODE = {config.DEV_MODE})")
     
-    # 尝试连接数据库
+    if config.VPN_MODE:
+        logger.info("VPN模式已启用，将尝试连接医院内网资源")
+    else:
+        logger.warning("VPN模式已禁用，将无法连接医院内网资源")
+        
+    # 托盘栏
+    logger.info("初始化系统托盘...")
+    tray = tray_task.tray_task.TrayTask()
+    threading.Thread(target=tray.setup_systray, daemon=True).start()
+    
+    # 连接扫描器
+    logger.info(f"连接扫描器 (端口: {config.SERIAL_PORT}, 波特率: {config.BAUDRATE})...")
     try:
-        # 在开发模式下提供友好错误处理
+        qr_code_scanner = scan.scanner.Scanner(config.SERIAL_PORT, config.BAUDRATE)
+        if not qr_code_scanner.is_open():
+            # 扫描器打开失败进行提示
+            logger.critical(f"扫描器连接失败，端口:{config.SERIAL_PORT}, 波特率:{config.BAUDRATE}")
+            error_window(f"扫描器连接失败，请检查连接或修改CONFIG.py中的参数\n"
+                         f"当前端口:{config.SERIAL_PORT}, 波特率:{config.BAUDRATE}", 500, 150)
+            logger.info("程序退出 - 原因: 扫描器连接失败")
+            return
+        logger.info("扫描器连接成功")
+    except Exception as e:
+        logger.critical(f"扫描器连接异常: {str(e)}")
+        error_window(f"扫描器连接异常，请检查连接或修改CONFIG.py中的参数\n"
+                     f"当前端口:{config.SERIAL_PORT}, 波特率:{config.BAUDRATE}\n"
+                     f"异常信息: {str(e)}", 500, 180)
+        logger.info("程序退出 - 原因: 扫描器连接异常")
+        return
+
+    # 用来存储序列号，在界面上显示
+    current_patient = {'serial_number': 0}
+
+    # 连接pg
+    pg_conn = None
+    if config.VPN_MODE:
+        logger.info(f"尝试连接PostgreSQL数据库 (主机: {config.POSTGRES_HOST}, 端口: {config.POSTGRES_PORT})...")
         try:
-            # 如果是开发模式，使用更短的连接超时
-            connect_timeout = 2 if hasattr(config, 'DEV_MODE') and config.DEV_MODE else 30
-            connection = psycopg2.connect(
+            pg_conn = psycopg2.connect(
                 host=config.POSTGRES_HOST,
                 port=config.POSTGRES_PORT,
                 user=config.POSTGRES_USERNAME,
                 password=config.POSTGRES_PASSWORD,
-                database=config.POSTGRES_DATABASE,
-                connect_timeout=connect_timeout  # 开发模式下使用短超时
+                database=config.POSTGRES_DATABASE
             )
-            cursor = connection.cursor()
-            print("[DEV] 成功连接到PostgreSQL数据库")
-        except (psycopg2.Error, Exception) as e:
-            # 开发模式下使用模拟数据库环境
-            print(f"[DEV] 数据库连接失败：{e}")
-            if hasattr(config, 'VPN_MODE') and config.VPN_MODE:
-                print("[DEV] VPN模式连接失败，可能是VPN未连接或网络问题")
-                print("[DEV] 请检查VPN连接状态或切换回普通开发模式")
-            print("[DEV] 使用模拟数据库环境...")
-            
-            class MockCursor:
-                def __init__(self):
-                    # 模拟患者数据库
-                    self.patients_db = {
-                        '123456': ('123456', '张三', '45', '妇科', '李医生'),
-                        '234567': ('234567', '李四', '32', '内科', '王医生'),
-                        '345678': ('345678', '王五', '28', '外科', '赵医生'),
-                        '456789': ('456789', '赵六', '50', '急诊', '钱医生'),
-                        '567890': ('567890', '钱七', '36', '儿科', '孙医生'),
-                        '00001719': ('00001719', '测试患者', '40', '妇科', '测试医生'),
-                    }
-                    # 有多个匹配项的测试用例
-                    self.multiple_matches = ['999999', '888888']
-                    # 模拟不存在的病例
-                    self.not_found = ['111111', '222222', '000000']
-                
-                def execute(self, query):
-                    print(f"[DEV] 执行SQL: {query}")
-                    self.last_query = query
-                    return self
-                
-                def fetchall(self):
-                    print("[DEV] 返回模拟数据...")
-                    # 解析SQL查询中的诊疗卡号
-                    import re
-                    card_match = re.search(r"JIUZHENKH='([^']+)'", self.last_query)
-                    if not card_match:
-                        return []
-                    
-                    card_number = card_match.group(1)
-                    
-                    # 检查是否是特殊测试案例
-                    if card_number in self.multiple_matches:
-                        # 返回多条记录模拟多个匹配情况
-                        return [
-                            (card_number, f'测试患者1', '30', '测试科室', '测试医生'),
-                            (card_number, f'测试患者2', '35', '测试科室', '测试医生')
-                        ]
-                    elif card_number in self.not_found:
-                        # 返回空记录模拟未找到记录
-                        return []
-                    elif card_number in self.patients_db:
-                        # 返回匹配的患者记录
-                        return [self.patients_db[card_number]]
-                    else:
-                        # 默认返回一个通用记录
-                        return [(card_number, f'模拟患者_{card_number[-4:]}', '35', '妇科', '模拟医生')]
-            
-            class MockConnection:
-                def cursor(self):
-                    return MockCursor()
-            
-            connection = MockConnection()
-            cursor = connection.cursor()
-    except Exception as e:
-        dev_error_window(f"连接数据库失败: {e}", 900, 300)
-        raise e
-
-    # 样本编号相关
-    data_dir_path = r".\data"
-    if not os.path.exists(data_dir_path):
-        os.makedirs(data_dir_path)
-    data_file_path = os.path.join(data_dir_path, "data.json")
-    now_time = datetime.datetime.now()
-    now_year = now_time.year
-    # data.json文件存在
-    if os.path.isfile(data_file_path):
-        with open(data_file_path, 'r') as file:
-            data = json.load(file)
-    # data.json文件不存在，给与默认值
+            logger.info("PostgreSQL数据库连接成功")
+        except Exception as e:
+            logger.critical(f"PostgreSQL数据库连接失败: {str(e)}")
+            error_window(f"连接PostgreSQL数据库发生异常，请检查网络连接或修改CONFIG.py中的参数\n"
+                        f"主机地址:{config.POSTGRES_HOST}, 端口:{config.POSTGRES_PORT}\n"
+                        f"异常信息: {str(e)}", 500, 200)
+            logger.info("程序退出 - 原因: 数据库连接失败")
+            return
     else:
-        data = {"sample_number": 0, "year": now_year}
-        with open(data_file_path, 'w') as file:
-            json.dump(data, file)
-    record_year = data["year"]
+        logger.warning("VPN模式已禁用，跳过数据库连接")
 
-    print("[DEV] AutoLoader初始化完成，开始运行主循环...")
-    while True:
-        scann_data = qr_code_scanner.get_scanner_content()
+    # 测试自动填表
+    logger.info("测试自动填表功能...")
+    try:
+        auto_input.xcope.input_test()
+        logger.info("自动填表功能测试成功")
+    except Exception as e:
+        logger.error(f"自动填表测试失败: {str(e)}")
+        error_window(f"自动填表测试失败，请检查系统环境\n"
+                     f"异常信息: {str(e)}\n"
+                     f"程序将继续运行，但可能无法正常工作", 500, 200)
 
-        if scann_data == "AutoLoaderRollback":
-            data["sample_number"] = data["sample_number"] - 1
-            dev_error_window("样本编号已减少1", 600, 270)
-            continue
-        now_time = datetime.datetime.now()
-        now_year = now_time.year
-        if now_year != record_year:
-            data = {"sample_number": 0, "year": now_year}
-            record_year = data["year"]
-            with open(data_file_path, 'w') as file:
-                json.dump(data, file)
-        sample_number = data["sample_number"] + 1
-        if is_tj_starting(scann_data):
-            print(f"[DEV] 检测到体检条码: {scann_data}")
-            url = "http://192.168.0.17:18838/api/public/open/json/checkAppInfoQuery"
-            payload = json.dumps({
-                "hospCode": "tlsrmyy",
-                "checkCode": f"{scann_data}",
-                "applyType": "PACS",
-                "checkType": "阴道分泌物荧光检查",
-                "startTime": "",
-                "endTime": ""
-            })
-            headers = {
-                'Content-Type': 'application/json'
-            }
+    # 轮询
+    logger.info("进入主循环，等待扫描器输入...")
+    try:
+        while True:
             try:
-                print("[DEV] 尝试从体检系统获取数据...")
-                # 开发模式下不实际发送请求，使用模拟数据
-                # response = http_request.get_response("POST", url, 1, 10, verify=False, headers=headers, data=payload)
-                
-                # 模拟响应
-                class MockResponse:
-                    @property
-                    def text(self):
-                        return json.dumps({
-                            "msg": "发送成功",
-                            "code": "1001",
-                            "data": [
-                                {
-                                    "name": "测试患者",
-                                    "age": 45,
-                                    "checkCode": scann_data,
-                                    "applyDct": "测试医生",
-                                    "departName": "体检中心"
-                                }
-                            ]
-                        })
-                
-                response = MockResponse()
-                print("[DEV] 成功获取模拟数据")
-                
+                # 获取扫描的内容
+                scanner_result = qr_code_scanner.get_scanner_content()
+                logger.info(f"扫描器输入: {scanner_result}")
+
+                # 检查是否为回退特殊指令
+                if scanner_result == "AutoLoaderRollback":
+                    current_patient['serial_number'] -= 1
+                    logger.info(f"执行回退操作，当前序号变更为: {current_patient['serial_number']}")
+                    continue
+
+                # 根据是否是TJ开头区分是体检系统还是主系统抽血
+                if is_tj_starting(scanner_result):
+                    logger.info(f"检测到体检系统条码: {scanner_result}")
+                    # 体检系统的流程
+                    try:
+                        # 体检系统
+                        # 生成序列号
+                        current_patient['serial_number'] += 1
+                        current_time = datetime.datetime.now().strftime("%Y%m%d")
+                        serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
+                        logger.info(f"生成新序列号: {serial_number}")
+                        
+                        # 从PG中读取病人数据
+                        if config.VPN_MODE and pg_conn:
+                            logger.debug("尝试从PostgreSQL数据库获取患者信息")
+                            data = data_processing.check_patient_message(scanner_result, pg_conn)
+                        else:
+                            logger.debug("VPN模式禁用，使用模拟患者数据")
+                            # 开发模式使用模拟数据
+                            data = {
+                                'patient_name': '张三(开发模式)',
+                                'test_type': '阴道分泌物检查(模拟)',
+                                'patient_sex': '女',
+                                'birth_date': '1990-01-01',
+                                'patient_age': '33'
+                            }
+                            
+                        if data:
+                            logger.info(f"获取到患者信息: {data['patient_name']}")
+                            auto_input.autoscope.input_message(serial_number, data["patient_name"],
+                                                            data["test_type"], data["patient_sex"],
+                                                            data["birth_date"], data["patient_age"])
+                        else:
+                            logger.warning(f"未找到患者信息: {scanner_result}")
+                            error_window(f"未找到患者信息，请检查扫描条码是否正确\n条码: {scanner_result}", 500, 150)
+
+                    except Exception as e:
+                        logger.error(f"处理体检系统条码异常: {str(e)}", exc_info=True)
+                        error_window(f"处理体检系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
+
+                else:
+                    logger.info(f"检测到医院HIS系统条码: {scanner_result}")
+                    # HIS系统的流程
+                    try:
+                        # His系统
+                        # 生成序列号
+                        current_patient['serial_number'] += 1
+                        current_time = datetime.datetime.now().strftime("%Y%m%d")
+                        serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
+                        logger.info(f"生成新序列号: {serial_number}")
+
+                        if config.VPN_MODE:
+                            logger.debug("尝试从HIS系统获取患者信息")
+                            data = data_processing.check_patient_his_message(scanner_result)
+                        else:
+                            logger.debug("VPN模式禁用，使用模拟HIS患者数据")
+                            # 开发模式使用模拟数据
+                            data = {
+                                'patient_name': '李四(开发模式)',
+                                'visit_id': scanner_result,
+                                'patient_sex': '男',
+                                'birth_date': '1985-05-05',
+                                'patient_age': '38',
+                                'dept_name': '内科(模拟)',
+                                'dept_no': 'N001'
+                            }
+                            
+                        if data:
+                            logger.info(f"获取到患者信息: {data['patient_name']}")
+                            auto_input.xcope.input_message(serial_number, data["patient_name"],
+                                                        data["visit_id"], data["patient_sex"],
+                                                        data["birth_date"], data["patient_age"],
+                                                        data["dept_name"], data["dept_no"])
+                        else:
+                            logger.warning(f"未找到患者HIS信息: {scanner_result}")
+                            error_window(f"未找到患者HIS信息，请检查扫描条码是否正确\n条码: {scanner_result}", 500, 150)
+
+                    except Exception as e:
+                        logger.error(f"处理医院HIS系统条码异常: {str(e)}", exc_info=True)
+                        error_window(f"处理医院HIS系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
+
+            except FailSafeException:
+                logger.warning("触发PyAutoGUI故障安全异常 - 鼠标移动到屏幕角落")
+                error_window("自动填表过程中检测到鼠标移动到屏幕角落，自动操作已中断\n请避免在操作过程中移动鼠标", 500, 150)
             except Exception as e:
-                data["sample_number"] = sample_number - 1
-                dev_error_window(f"获取数据失败,请稍后再尝试,错误码:3 - {str(e)}", 900, 270)
-                continue
-                
-            patient_info = data_processing.json_to_dict(response.text).get('data')
-            if not patient_info:
-                data["sample_number"] = sample_number - 1
-                dev_error_window("体检系统查询不到该病人数据，错误码:2", 900, 270)
-                continue
-            else:
-                patient_info = patient_info[0]
-                
-            xcope_xm = patient_info.get('name')
-            xcope_nl = patient_info.get('age')
-            xcope_zlkh = patient_info.get('checkCode')
-            xcope_sjys = patient_info.get('applyDct')
-            xcope_sjks = patient_info.get('departName')
-            xcope_ybbh = f"M{now_year}{str(sample_number).zfill(5)}"
-            data["sample_number"] = sample_number
+                logger.error(f"主循环异常: {str(e)}", exc_info=True)
+                error_window(f"发生意外异常，请重试\n异常信息: {str(e)}", 500, 150)
+
+    except KeyboardInterrupt:
+        logger.info("检测到键盘中断，程序正常退出")
+    except Exception as e:
+        logger.critical(f"程序异常退出: {str(e)}", exc_info=True)
+        error_window(f"程序异常退出\n异常信息: {str(e)}", 500, 150)
+    finally:
+        # 关闭连接
+        try:
+            if pg_conn:
+                pg_conn.close()
+                logger.info("PostgreSQL数据库连接已关闭")
+        except Exception as e:
+            logger.error(f"关闭数据库连接异常: {str(e)}")
             
-            # 在开发模式下只显示结果，不实际操作界面
-            print("\n" + "="*50)
-            print("[DEV] 自动输入以下信息:")
-            print("="*50)
-            print(f"姓名: {xcope_xm}")
-            print(f"年龄: {xcope_nl}")
-            print(f"诊疗卡号: {xcope_zlkh}")
-            print(f"样本编号: {xcope_ybbh}")
-            print(f"送检医师: {xcope_sjys}")
-            print(f"送检科室: {xcope_sjks}")
-            print("="*50)
+        try:
+            if 'qr_code_scanner' in locals() and qr_code_scanner:
+                qr_code_scanner.close()
+                logger.info("扫描器连接已关闭")
+        except Exception as e:
+            logger.error(f"关闭扫描器连接异常: {str(e)}")
             
-            with open(data_file_path, 'w') as file:
-                json.dump(data, file)
-        else:
-            print(f"[DEV] 检测到诊疗卡号: {scann_data}")
-            sql = f"SELECT JIUZHENKH,XINGMING,NIANLING,KESHIMC,KAIDANREN FROM v_binglikaidan_bingrenxx WHERE JIUZHENKH='{scann_data}'"
-            try:
-                print(f"[DEV] 执行SQL查询: {sql}")
-                cursor.execute(sql)
-                patient_infos = cursor.fetchall()
-                print(f"[DEV] 查询结果: {patient_infos}")
-            except Exception as e:
-                dev_error_window(f"数据库查询失败: {e}", 900, 300)
-                continue
-                
-            length = len(patient_infos)
-            if length == 1:
-                patient_info = patient_infos[0]
-                xcope_xm = patient_info[1]
-                xcope_nl = patient_info[2]
-                xcope_zlkh = patient_info[0]
-                xcope_ybbh = f"M{now_year}{str(sample_number).zfill(5)}"
-                data["sample_number"] = sample_number
-                xcope_sjys = patient_info[4]
-                xcope_sjks = patient_info[3]
-                
-                # 在开发模式下只显示结果，不实际操作界面
-                print("\n" + "="*50)
-                print("[DEV] 自动输入以下信息:")
-                print("="*50)
-                print(f"姓名: {xcope_xm}")
-                print(f"年龄: {xcope_nl}")
-                print(f"诊疗卡号: {xcope_zlkh}")
-                print(f"样本编号: {xcope_ybbh}")
-                print(f"送检医师: {xcope_sjys}")
-                print(f"送检科室: {xcope_sjks}")
-                print("="*50)
-                
-                with open(data_file_path, 'w') as file:
-                    json.dump(data, file)
-            elif length == 0:
-                data["sample_number"] = sample_number - 1
-                dev_error_window("该号码在数据库查询不到", 600, 270)
-                continue
-            else:
-                data["sample_number"] = sample_number - 1
-                dev_error_window("该号码在数据库存在多个,无法自动输入", 600, 270)
-                continue
+        logger.info("===== AutoLoader 程序结束 =====")
 
 
 if __name__ == '__main__':
+    # 注册信号处理，确保程序能够优雅退出
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+    
     try:
-        print("\n" + "="*50)
-        print("AutoLoader 开发模式")
-        print("="*50)
-        print("此版本专为开发环境设计，不包含实际自动化操作")
-        print("- 数据库连接: 尝试真实连接，失败时使用模拟数据")
-        print("- 扫描器: 使用控制台输入模拟")
-        print("- 用户界面: 使用控制台输出代替图形界面")
-        print("="*50 + "\n")
-        
-        main()
-    except KeyboardInterrupt:
-        print("\n[DEV] 用户中断程序")
+        # 尝试清理过期日志文件（保留30天）
+        logger.cleanup_logs(days_to_keep=30)
     except Exception as e:
-        print(f"\n[DEV] 程序异常退出: {e}")
-    finally:
-        print("\n[DEV] 程序已退出") 
+        print(f"清理日志文件失败: {str(e)}")
+        
+    main() 
