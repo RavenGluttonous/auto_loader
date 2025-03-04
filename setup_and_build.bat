@@ -277,7 +277,9 @@ if exist "icon.ico" (
     )
 )
 
-if %errorlevel% neq 0 (
+set BUILD_RESULT=%errorlevel%
+
+if %BUILD_RESULT% neq 0 (
     echo [ERROR] Build failed
     echo Checking for issues...
     
@@ -295,46 +297,51 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-if %errorlevel% equ 0 (
+echo [INFO] Checking for dist directory...
+if exist "dist\auto_loader" (
     echo [INFO] Creating post-deployment configuration helper...
     
     (
         echo @echo off
+        echo chcp 936 ^>nul
         echo echo ========================================
-        echo echo    AutoLoader Configuration Tool
+        echo echo    AutoLoader配置工具
         echo echo ========================================
         echo echo.
-        echo echo This tool will copy the config_deploy.py to the internal location
-        echo echo to ensure your configuration changes take effect.
+        echo echo 此工具将复制config.py到内部位置，
+        echo echo 确保您的配置更改生效。
         echo echo.
-        echo echo Choose an option:
-        echo echo 1. Use existing config.py in the current directory
-        echo echo 2. Edit config.py before using it
+        echo echo 选择一个选项:
+        echo echo 1. 使用当前目录中的config.py
+        echo echo 2. 在使用前编辑config.py
         echo echo.
-        echo set /p config_choice="Your choice (1 or 2): "
+        echo set /p config_choice="您的选择 (1 或 2): "
         echo.
         echo if "%%config_choice%%"=="2" (
-        echo    echo Opening config.py for editing...
+        echo    echo 正在打开config.py进行编辑...
         echo    notepad config.py
         echo    echo.
         echo )
         echo.
-        echo echo Updating internal configuration...
+        echo echo 正在更新内部配置...
         echo if exist "_internal\config.py" (
         echo    copy /Y config.py _internal\config.py ^> nul
-        echo    echo Configuration updated successfully!
+        echo    echo 配置更新成功!
         echo ) else (
-        echo    echo Warning: _internal\config.py not found.
-        echo    echo Your changes may not take effect.
+        echo    echo 警告: 找不到_internal\config.py
+        echo    echo 您的更改可能不会生效。
         echo )
         echo.
-        echo echo Configuration complete. Press any key to exit.
+        echo echo 配置完成。按任意键退出。
         echo pause ^> nul
     ) > "dist\auto_loader\update_config.bat"
     
+    echo [INFO] Creating external config file...
     copy config_deploy.py "dist\auto_loader\config.py" >> %LOG_FILE% 2>&1
     
-    echo [OK] Created configuration helper in dist\auto_loader\update_config.bat
+    echo [OK] Created configuration helper and config file in dist\auto_loader\
+) else (
+    echo [WARNING] dist\auto_loader directory not found, cannot create configuration files
 )
 
 echo.
