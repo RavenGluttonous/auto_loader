@@ -115,7 +115,17 @@ def main():
     # 尝试编辑xcope
     logger.info("测试自动填表功能...")
     try:
-        auto_input.xcope.input_test()
+        # 使用测试数据测试自动填表功能
+        auto_input.xcope.xcope_input(
+            xm="测试姓名",
+            nl="30",
+            zlkh="TEST001",
+            ybbh="YB001",
+            ch="101",
+            bbzl="血液",
+            sjys="测试医生",
+            sjks="测试科室"
+        )
         logger.info("自动填表功能测试成功")
     except Exception as e:
         logger.error(f"自动填表测试失败: {str(e)}")
@@ -151,15 +161,58 @@ def main():
                         logger.info(f"生成新序列号: {serial_number}")
                         
                         # 从PG中读取病人数据
-                        data = data_processing.check_patient_message(scanner_result, pg_conn)
-                        if data:
-                            logger.info(f"获取到患者信息: {data['patient_name']}")
-                            auto_input.autoscope.input_message(serial_number, data["patient_name"],
-                                                              data["test_type"], data["patient_sex"],
-                                                              data["birth_date"], data["patient_age"])
-                        else:
-                            logger.warning(f"未找到患者信息: {scanner_result}")
-                            error_window(f"未找到患者信息，请检查扫描条码是否正确\n条码: {scanner_result}", 500, 150)
+                        url = "http://192.168.0.17:18838/api/public/open/json/checkAppInfoQuery"
+                        payload = json.dumps({
+                            "hospCode": "tlsrmyy",
+                            "checkCode": f"{scanner_result}",
+                            "applyType": "PACS",
+                            "checkType": "阴道分泌物荧光检查",
+                            "startTime": "",
+                            "endTime": ""
+                        })
+                        headers = {
+                            'Content-Type': 'application/json'
+                        }
+                        try:
+                            response = http_request.get_response("POST", url, 1, 10, verify=False, headers=headers, data=payload)
+                        except requests.exceptions.RequestException as e:
+                            logger.error(f"获取数据失败: {str(e)}")
+                            error_window(f"获取数据失败,请稍后再尝试,错误码:3", 900, 270)
+                            continue
+
+                        if response is None:
+                            logger.warning("获取不到体检病人数据")
+                            error_window(f"获取不到体检病人数据,请稍后再尝试,错误码:1", 900, 270)
+                            continue
+
+                        patient_info = data_processing.json_to_dict(response.text).get('data')
+                        if not patient_info:
+                            logger.warning("体检系统查询不到该病人数据")
+                            error_window("体检系统查询不到该病人数据，错误码:2", 900, 270)
+                            continue
+                        
+                        patient_info = patient_info[0]
+                        xcope_xm = patient_info.get('name')
+                        xcope_nl = patient_info.get('age')
+                        xcope_zlkh = patient_info.get('checkCode')
+                        xcope_sjys = patient_info.get('applyDct')
+                        xcope_sjks = patient_info.get('departName')
+                        xcope_ybbh = f"M{current_time[:4]}{str(current_patient['serial_number']).zfill(5)}"
+
+                        try:
+                            auto_input.xcope.xcope_input(
+                                xm=xcope_xm,
+                                nl=xcope_nl,
+                                zlkh=xcope_zlkh,
+                                sjys=xcope_sjys,
+                                sjks=xcope_sjks,
+                                ybbh=xcope_ybbh
+                            )
+                            logger.info(f"自动填表成功: {xcope_xm}")
+                        except FailSafeException:
+                            logger.warning("自动填表过程中检测到鼠标移动到屏幕角落")
+                            error_window("自动输入过程，鼠标光标请不要移动到屏幕的四个角落，请移动回正确位置再重新扫描。", 900, 300)
+                            continue
 
                     except Exception as e:
                         logger.error(f"处理体检系统条码异常: {str(e)}", exc_info=True)
@@ -176,16 +229,102 @@ def main():
                         serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
                         logger.info(f"生成新序列号: {serial_number}")
 
-                        data = data_processing.check_patient_his_message(scanner_result)
-                        if data:
-                            logger.info(f"获取到患者信息: {data['patient_name']}")
-                            auto_input.xcope.input_message(serial_number, data["patient_name"],
-                                                           data["visit_id"], data["patient_sex"],
-                                                           data["birth_date"], data["patient_age"],
-                                                           data["dept_name"], data["dept_no"])
+                        # 首先检查表是否存在
+                        check_table_sql = """
+                            SELECT EXISTS (
+                                SELECT 1 
+                                FROM information_schema.tables 
+                                WHERE table_schema = 'vela_jc'
+                                AND table_name = 'jc_sq_shenqingdan'
+                            );
+                        """
+                        try:
+                            cursor = pg_conn.cursor()
+                            cursor.execute(check_table_sql)
+                            table_exists = cursor.fetchone()[0]
+                            
+                            if not table_exists:
+                                logger.error("所需的表vela_jc.jc_sq_shenqingdan不存在")
+                                error_window("数据库缺少必要的表，请联系管理员检查数据库配置", 900, 300)
+                                cursor.close()
+                                continue
+
+                            # 如果表存在，先获取列名
+                            columns_sql = """
+                                SELECT column_name 
+                                FROM information_schema.columns 
+                                WHERE table_schema = 'vela_jc' 
+                                AND table_name = 'jc_sq_shenqingdan'
+                                ORDER BY ordinal_position;
+                            """
+                            cursor.execute(columns_sql)
+                            columns = [col[0] for col in cursor.fetchall()]
+                            logger.info(f"表字段名称: {', '.join(columns)}")
+
+                            # 执行查询
+                            sql = f"""
+                                SELECT * FROM vela_jc.jc_sq_shenqingdan 
+                                WHERE jiuzhenkh = '{scanner_result}'
+                                AND zuofeibz = 0  -- 未作废的记录
+                                ORDER BY chuangjiansj DESC  -- 按创建时间倒序
+                                LIMIT 1  -- 只取最新的一条
+                            """
+                            cursor.execute(sql)
+                            patient_infos = cursor.fetchall()
+                            
+                            # 如果有数据，打印第一条记录的所有字段值
+                            if patient_infos:
+                                logger.info("查询结果的第一条记录:")
+                                for idx, col in enumerate(columns):
+                                    logger.info(f"{col}: {patient_infos[0][idx]}")
+                            
+                            cursor.close()
+                            # 提交事务
+                            pg_conn.commit()
+                            
+                        except Exception as e:
+                            logger.error(f"数据库查询失败: {str(e)}")
+                            error_window(f"数据库查询失败，请检查数据库配置\n异常信息: {str(e)}", 900, 300)
+                            # 回滚事务
+                            pg_conn.rollback()
+                            if cursor and not cursor.closed:
+                                cursor.close()
+                            continue
+
+                        length = len(patient_infos)
+                        if length == 1:
+                            patient_info = patient_infos[0]
+                            # 根据实际的字段位置获取数据
+                            xcope_xm = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'xingming')
+                            xcope_nl = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'nianling')
+                            xcope_zlkh = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'jiuzhenkh')
+                            xcope_sjys = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'kaidanrxm')
+                            xcope_sjks = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'kaidanksmc')
+                            xcope_ybbh = f"M{current_time[:4]}{str(current_patient['serial_number']).zfill(5)}"
+
+                            try:
+                                auto_input.xcope.xcope_input(
+                                    xm=xcope_xm,
+                                    nl=str(xcope_nl),  # 确保转换为字符串
+                                    zlkh=xcope_zlkh,
+                                    sjys=xcope_sjys,
+                                    sjks=xcope_sjks,
+                                    ybbh=xcope_ybbh
+                                )
+                                logger.info(f"自动填表成功: {xcope_xm}")
+                            except FailSafeException:
+                                logger.warning("自动填表过程中检测到鼠标移动到屏幕角落")
+                                error_window("自动输入过程，鼠标光标请不要移动到屏幕的四个角落，请移动回正确位置再重新扫描。", 900, 300)
+                                continue
+
+                        elif length == 0:
+                            logger.warning(f"未找到患者信息: {scanner_result}")
+                            error_window("该号码在数据库查询不到", 600, 270)
+                            continue
                         else:
-                            logger.warning(f"未找到患者HIS信息: {scanner_result}")
-                            error_window(f"未找到患者HIS信息，请检查扫描条码是否正确\n条码: {scanner_result}", 500, 150)
+                            logger.warning(f"找到多个患者记录: {scanner_result}")
+                            error_window("该号码在数据库存在多个,无法自动输入", 600, 270)
+                            continue
 
                     except Exception as e:
                         logger.error(f"处理医院HIS系统条码异常: {str(e)}", exc_info=True)

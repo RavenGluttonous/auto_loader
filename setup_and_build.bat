@@ -3,17 +3,24 @@ setlocal enabledelayedexpansion
 title AutoLoader Setup Tool
 color 0A
 
+REM Check if we are in the correct directory
+if not exist "auto_loader.py" (
+    echo [WARNING] auto_loader.py not found in current directory
+    echo Checking parent directory...
+    cd ..
+    if exist "auto_loader.py" (
+        echo [OK] Found auto_loader.py in parent directory
+    ) else (
+        echo [ERROR] Could not find auto_loader.py
+        echo Please run this script from the same directory as auto_loader.py
+        pause
+        exit /b 1
+    )
+)
+
 echo ========================================
 echo    AutoLoader Installation Tool
 echo ========================================
-echo.
-
-REM Clean previous build files
-echo Cleaning previous build files...
-if exist "dist\" rmdir /s /q dist
-if exist "build\" rmdir /s /q build
-if exist "*.spec" del /f /q *.spec
-echo Clean completed.
 echo.
 
 REM Create logs directory
@@ -180,10 +187,6 @@ if not exist "config.py" (
     )
 )
 
-REM Create a deployment version of config.py without sensitive data
-echo [INFO] Creating deployment config template...
-copy config.py config_deploy.py >> %LOG_FILE% 2>&1
-
 REM Check for required files for build
 if not exist "auto_loader.py" (
     echo [ERROR] auto_loader.py not found
@@ -205,8 +208,7 @@ if exist "logo.jpg" (
     REM Delete existing convert_icon.py if it exists
     if exist "convert_icon.py" (
         del /f /q convert_icon.py > nul 2>&1
-        REM Use ping as a replacement for timeout
-        ping -n 2 127.0.0.1 > nul
+        timeout /t 1 /nobreak > nul
     )
     
     REM Use a single Python command with inline code
@@ -217,7 +219,7 @@ if exist "logo.jpg" (
         echo Trying alternative method...
         
         REM Try an alternative approach with delayed execution
-        ping -n 3 127.0.0.1 > nul
+        timeout /t 2 /nobreak > nul
         
         REM Create the Python script through a separate temp file
         (
@@ -237,7 +239,7 @@ if exist "logo.jpg" (
         move /y convert_temp.py convert_icon.py > nul 2>&1
         
         REM Wait to ensure file is released
-        ping -n 2 127.0.0.1 > nul
+        timeout /t 1 /nobreak > nul
         
         REM Execute the script
         python convert_icon.py
@@ -258,28 +260,46 @@ REM Build executable
 echo [Step 4/4] Building executable...
 echo This may take a few minutes...
 
-REM Check if we have a valid icon file and beep.wav file
+REM Clean up previous build files
+echo [INFO] Cleaning up previous build files...
+if exist "dist\auto_loader" (
+    echo Removing old build files...
+    rd /s /q "dist\auto_loader" >> %LOG_FILE% 2>&1
+)
+if exist "build" (
+    rd /s /q "build" >> %LOG_FILE% 2>&1
+)
+if exist "*.spec" (
+    del /f /q *.spec >> %LOG_FILE% 2>&1
+)
+
+REM Check if we have a valid icon file
 if exist "icon.ico" (
+    echo [INFO] Using icon.ico for application
+    pyinstaller --name="auto_loader" --windowed --icon=icon.ico --add-data="icon.ico;." --add-data="config.py;." auto_loader.py -y >> %LOG_FILE% 2>&1
+    
+    REM Check if beep.wav exists before adding it
     if exist "beep.wav" (
-        echo [INFO] Building with icon.ico and beep.wav
-        pyinstaller --name="auto_loader" --windowed --icon=icon.ico --add-data="icon.ico;." --add-data="beep.wav;." --add-data="config_deploy.py;." auto_loader.py >> %LOG_FILE% 2>&1
+        echo [INFO] Adding beep.wav resource
+        pyinstaller --name="auto_loader" --windowed --icon=icon.ico --add-data="icon.ico;." --add-data="config.py;." --add-data="beep.wav;." auto_loader.py -y >> %LOG_FILE% 2>&1
     ) else (
-        echo [INFO] Building with icon.ico (beep.wav not found)
-        pyinstaller --name="auto_loader" --windowed --icon=icon.ico --add-data="icon.ico;." --add-data="config_deploy.py;." auto_loader.py >> %LOG_FILE% 2>&1
+        echo [INFO] beep.wav not found, building without it
+        pyinstaller --name="auto_loader" --windowed --icon=icon.ico --add-data="icon.ico;." --add-data="config.py;." auto_loader.py -y >> %LOG_FILE% 2>&1
     )
 ) else (
+    echo [INFO] Building without custom icon
+    
+    REM Check if beep.wav exists before adding it
     if exist "beep.wav" (
-        echo [INFO] Building with beep.wav (no icon)
-        pyinstaller --name="auto_loader" --windowed --add-data="beep.wav;." --add-data="config_deploy.py;." auto_loader.py >> %LOG_FILE% 2>&1
+        echo [INFO] Adding beep.wav resource
+        pyinstaller --name="auto_loader" --windowed --add-data="config.py;." --add-data="beep.wav;." auto_loader.py -y >> %LOG_FILE% 2>&1
     ) else (
-        echo [INFO] Building without icon or sound resources
-        pyinstaller --name="auto_loader" --windowed --add-data="config_deploy.py;." auto_loader.py >> %LOG_FILE% 2>&1
+        echo [INFO] beep.wav not found, building without resources
+        pyinstaller --name="auto_loader" --windowed --add-data="config.py;." auto_loader.py -y >> %LOG_FILE% 2>&1
     )
 )
 
-set BUILD_RESULT=%errorlevel%
-
-if %BUILD_RESULT% neq 0 (
+if %errorlevel% neq 0 (
     echo [ERROR] Build failed
     echo Checking for issues...
     
@@ -297,52 +317,132 @@ if %BUILD_RESULT% neq 0 (
     exit /b 1
 )
 
-echo [INFO] Checking for dist directory...
-if exist "dist\auto_loader" (
-    echo [INFO] Creating post-deployment configuration helper...
-    
-    (
-        echo @echo off
-        echo chcp 936 ^>nul
-        echo echo ========================================
-        echo echo    AutoLoader配置工具
-        echo echo ========================================
-        echo echo.
-        echo echo 此工具将复制config.py到内部位置，
-        echo echo 确保您的配置更改生效。
-        echo echo.
-        echo echo 选择一个选项:
-        echo echo 1. 使用当前目录中的config.py
-        echo echo 2. 在使用前编辑config.py
-        echo echo.
-        echo set /p config_choice="您的选择 (1 或 2): "
-        echo.
-        echo if "%%config_choice%%"=="2" (
-        echo    echo 正在打开config.py进行编辑...
-        echo    notepad config.py
-        echo    echo.
-        echo )
-        echo.
-        echo echo 正在更新内部配置...
-        echo if exist "_internal\config.py" (
-        echo    copy /Y config.py _internal\config.py ^> nul
-        echo    echo 配置更新成功!
-        echo ) else (
-        echo    echo 警告: 找不到_internal\config.py
-        echo    echo 您的更改可能不会生效。
-        echo )
-        echo.
-        echo echo 配置完成。按任意键退出。
-        echo pause ^> nul
-    ) > "dist\auto_loader\update_config.bat"
-    
-    echo [INFO] Creating external config file...
-    copy config_deploy.py "dist\auto_loader\config.py" >> %LOG_FILE% 2>&1
-    
-    echo [OK] Created configuration helper and config file in dist\auto_loader\
-) else (
-    echo [WARNING] dist\auto_loader directory not found, cannot create configuration files
+REM Copy configuration files to dist directory
+echo [INFO] Setting up configuration files...
+echo [%time%] Setting up configuration files... >> %LOG_FILE%
+
+REM Ensure dist\auto_loader directory exists
+if not exist "dist\auto_loader" (
+    echo [WARNING] dist\auto_loader directory not found
+    echo Creating directory...
+    mkdir "dist\auto_loader" >> %LOG_FILE% 2>&1
 )
+
+REM Copy or create config.py
+if exist "config.py" (
+    echo [INFO] Copying existing config.py...
+    copy /Y "config.py" "dist\auto_loader\config.py" >> %LOG_FILE% 2>&1
+) else (
+    echo [INFO] Creating new config.py...
+    (
+        echo # Database Configuration
+        echo POSTGRES_HOST = "localhost"
+        echo POSTGRES_PORT = 5432
+        echo POSTGRES_USERNAME = "postgres"
+        echo POSTGRES_PASSWORD = "postgres"
+        echo POSTGRES_DATABASE = "postgres"
+        echo # Serial Port Configuration
+        echo SERIAL_PORT = "COM1"
+        echo BAUDRATE = "115200"
+    ) > "dist\auto_loader\config.py"
+)
+
+REM Create update_config.bat
+echo [INFO] Creating configuration update tool...
+echo @echo off > "dist\auto_loader\update_config.bat"
+echo chcp 65001 > nul >> "dist\auto_loader\update_config.bat"
+echo setlocal enabledelayedexpansion >> "dist\auto_loader\update_config.bat"
+echo title AutoLoader Configuration Tool >> "dist\auto_loader\update_config.bat"
+echo color 0A >> "dist\auto_loader\update_config.bat"
+echo. >> "dist\auto_loader\update_config.bat"
+echo :menu >> "dist\auto_loader\update_config.bat"
+echo cls >> "dist\auto_loader\update_config.bat"
+echo echo ======================================== >> "dist\auto_loader\update_config.bat"
+echo echo    AutoLoader Configuration Tool >> "dist\auto_loader\update_config.bat"
+echo echo ======================================== >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Checking available COM ports... >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo for /f "tokens=1,2*" %%%%a in ('reg query HKLM\HARDWARE\DEVICEMAP\SERIALCOMM 2^^^>nul') do ( >> "dist\auto_loader\update_config.bat"
+echo    echo     %%%%c is available >> "dist\auto_loader\update_config.bat"
+echo ) >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Current configuration: >> "dist\auto_loader\update_config.bat"
+echo echo ---------------------------------------- >> "dist\auto_loader\update_config.bat"
+echo type config.py >> "dist\auto_loader\update_config.bat"
+echo echo ---------------------------------------- >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Options: >> "dist\auto_loader\update_config.bat"
+echo echo [1] Use current config.py >> "dist\auto_loader\update_config.bat"
+echo echo [2] Edit config.py >> "dist\auto_loader\update_config.bat"
+echo echo [3] Exit >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo set /p choice="Enter your choice (1-3): " >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo if "%%choice%%"=="1" goto use_current >> "dist\auto_loader\update_config.bat"
+echo if "%%choice%%"=="2" goto edit_config >> "dist\auto_loader\update_config.bat"
+echo if "%%choice%%"=="3" goto end >> "dist\auto_loader\update_config.bat"
+echo echo Invalid choice. Please try again. >> "dist\auto_loader\update_config.bat"
+echo pause >> "dist\auto_loader\update_config.bat"
+echo goto menu >> "dist\auto_loader\update_config.bat"
+echo. >> "dist\auto_loader\update_config.bat"
+echo :edit_config >> "dist\auto_loader\update_config.bat"
+echo copy /Y config.py config.py.bak ^> nul 2^>^&1 >> "dist\auto_loader\update_config.bat"
+echo if exist config.py.bak ( >> "dist\auto_loader\update_config.bat"
+echo    echo [OK] Backup created: config.py.bak >> "dist\auto_loader\update_config.bat"
+echo ) else ( >> "dist\auto_loader\update_config.bat"
+echo    echo [WARNING] Failed to create backup >> "dist\auto_loader\update_config.bat"
+echo ) >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Opening config.py in Notepad... >> "dist\auto_loader\update_config.bat"
+echo echo NOTE: Do not close this window while editing. >> "dist\auto_loader\update_config.bat"
+echo start /wait notepad config.py >> "dist\auto_loader\update_config.bat"
+echo goto verify_config >> "dist\auto_loader\update_config.bat"
+echo. >> "dist\auto_loader\update_config.bat"
+echo :use_current >> "dist\auto_loader\update_config.bat"
+echo echo Using current configuration. >> "dist\auto_loader\update_config.bat"
+echo goto verify_config >> "dist\auto_loader\update_config.bat"
+echo. >> "dist\auto_loader\update_config.bat"
+echo :verify_config >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Verifying configuration... >> "dist\auto_loader\update_config.bat"
+echo echo ---------------------------------------- >> "dist\auto_loader\update_config.bat"
+echo type config.py >> "dist\auto_loader\update_config.bat"
+echo echo ---------------------------------------- >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Testing COM port access... >> "dist\auto_loader\update_config.bat"
+echo for /f "tokens=2 delims==" %%%%a in ('findstr /i "SERIAL_PORT" config.py') do ( >> "dist\auto_loader\update_config.bat"
+echo    set "PORT=%%%%a" >> "dist\auto_loader\update_config.bat"
+echo    set "PORT=%%PORT: =%%" >> "dist\auto_loader\update_config.bat"
+echo    set "PORT=%%PORT:"=%%" >> "dist\auto_loader\update_config.bat"
+echo    echo Checking port %%PORT%%... >> "dist\auto_loader\update_config.bat"
+echo    mode %%PORT%% ^> nul 2^>^&1 >> "dist\auto_loader\update_config.bat"
+echo    if errorlevel 1 ( >> "dist\auto_loader\update_config.bat"
+echo        echo [WARNING] Could not access %%PORT%% >> "dist\auto_loader\update_config.bat"
+echo        echo Please check if the port exists and is not in use >> "dist\auto_loader\update_config.bat"
+echo    ) else ( >> "dist\auto_loader\update_config.bat"
+echo        echo [OK] %%PORT%% is accessible >> "dist\auto_loader\update_config.bat"
+echo    ) >> "dist\auto_loader\update_config.bat"
+echo ) >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Configuration update completed. >> "dist\auto_loader\update_config.bat"
+echo echo The new settings will take effect when you restart the application. >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo [1] Return to main menu >> "dist\auto_loader\update_config.bat"
+echo echo [2] Exit >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo set /p next_action="Enter your choice (1-2): " >> "dist\auto_loader\update_config.bat"
+echo if "%%next_action%%"=="1" goto menu >> "dist\auto_loader\update_config.bat"
+echo if "%%next_action%%"=="2" goto end >> "dist\auto_loader\update_config.bat"
+echo echo Invalid choice. Please try again. >> "dist\auto_loader\update_config.bat"
+echo pause >> "dist\auto_loader\update_config.bat"
+echo goto verify_config >> "dist\auto_loader\update_config.bat"
+echo. >> "dist\auto_loader\update_config.bat"
+echo :end >> "dist\auto_loader\update_config.bat"
+echo echo. >> "dist\auto_loader\update_config.bat"
+echo echo Thank you for using AutoLoader Configuration Tool >> "dist\auto_loader\update_config.bat"
+echo pause >> "dist\auto_loader\update_config.bat"
+echo exit >> "dist\auto_loader\update_config.bat"
 
 echo.
 echo ========================================
@@ -351,12 +451,15 @@ echo    Executable is in 'dist\auto_loader' folder
 echo ========================================
 echo.
 echo Post-installation notes:
-echo 1. The application will use the internal configuration by default
-echo 2. To update configuration after deployment:
-echo    - Edit config.py in the application folder
-echo    - Run update_config.bat to apply changes
+echo 1. Make sure config.py has correct PostgreSQL settings:
+echo    - POSTGRES_HOST (localhost or your server IP)
+echo    - POSTGRES_PORT (default: 5432)
+echo    - POSTGRES_USERNAME 
+echo    - POSTGRES_PASSWORD
+echo    - POSTGRES_DATABASE
+echo 2. Use update_config.bat to modify configuration after deployment
 echo.
 echo Log file: %LOG_FILE%
 echo.
 pause
-exit /b 0
+exit /b 0 
