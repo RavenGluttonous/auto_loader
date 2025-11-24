@@ -13,7 +13,7 @@ import threading
 import time
 import sys
 
-import psycopg2
+# import psycopg2  # PostgreSQL 已停用，仅保留导入语句供参考
 import requests
 from pyautogui import FailSafeException
 
@@ -119,9 +119,9 @@ def check_end_mark():
             print(f"没有匹配到任何参数,原始数据为:{repr(data)}")
             logger.warning(f"扫描器设置检查异常，未匹配到预期内容，原始数据为:{repr(data)}")
 
-def is_tj_starting(string):
-    pattern = r"^TJ"
-    return bool(re.match(pattern, string))
+# def is_tj_starting(string):
+#     pattern = r"^TJ"
+#     return bool(re.match(pattern, string))
 
 @logger.log_function_call()  # 使用日志装饰器记录函数调用
 def main():
@@ -170,28 +170,28 @@ def main():
     # 用来存储序列号，在界面上显示
     current_patient = {'serial_number': 0}
 
-    # 连接pg
-    pg_conn = None
-    if config.VPN_MODE:
-        logger.info(f"尝试连接PostgreSQL数据库 (主机: {config.POSTGRES_HOST}, 端口: {config.POSTGRES_PORT})...")
-        try:
-            pg_conn = psycopg2.connect(
-                host=config.POSTGRES_HOST,
-                port=config.POSTGRES_PORT,
-                user=config.POSTGRES_USERNAME,
-                password=config.POSTGRES_PASSWORD,
-                database=config.POSTGRES_DATABASE
-            )
-            logger.info("PostgreSQL数据库连接成功")
-        except Exception as e:
-            logger.critical(f"PostgreSQL数据库连接失败: {str(e)}")
-            error_window(f"连接PostgreSQL数据库发生异常，请检查网络连接或修改CONFIG.py中的参数\n"
-                        f"主机地址:{config.POSTGRES_HOST}, 端口:{config.POSTGRES_PORT}\n"
-                        f"异常信息: {str(e)}", 500, 200)
-            logger.info("程序退出 - 原因: 数据库连接失败")
-            return
-    else:
-        logger.warning("VPN模式已禁用，跳过数据库连接")
+    # 连接pg（已停用，仅保留代码供参考）
+    # pg_conn = None
+    # if config.VPN_MODE:
+    #     logger.info(f"尝试连接PostgreSQL数据库 (主机: {config.POSTGRES_HOST}, 端口: {config.POSTGRES_PORT})...")
+    #     try:
+    #         pg_conn = psycopg2.connect(
+    #             host=config.POSTGRES_HOST,
+    #             port=config.POSTGRES_PORT,
+    #             user=config.POSTGRES_USERNAME,
+    #             password=config.POSTGRES_PASSWORD,
+    #             database=config.POSTGRES_DATABASE
+    #         )
+    #         logger.info("PostgreSQL数据库连接成功")
+    #     except Exception as e:
+    #         logger.critical(f"PostgreSQL数据库连接失败: {str(e)}")
+    #         error_window(f"连接PostgreSQL数据库发生异常，请检查网络连接或修改CONFIG.py中的参数\n"
+    #                     f"主机地址:{config.POSTGRES_HOST}, 端口:{config.POSTGRES_PORT}\n"
+    #                     f"异常信息: {str(e)}", 500, 200)
+    #         logger.info("程序退出 - 原因: 数据库连接失败")
+    #         return
+    # else:
+    #     logger.warning("VPN模式已禁用，跳过数据库连接")
 
     # 测试自动填表
     logger.info("测试自动填表功能...")
@@ -231,21 +231,21 @@ def main():
                         serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
                         logger.info(f"生成新序列号: {serial_number}")
                         
-                        # 从PG中读取病人数据
-                        if config.VPN_MODE and pg_conn:
-                            logger.debug("尝试从PostgreSQL数据库获取患者信息")
-                            data = data_processing.check_patient_message(scanner_result, pg_conn)
-                        else:
-                            logger.debug("VPN模式禁用，使用模拟患者数据")
-                            # 开发模式使用模拟数据
-                            data = {
-                                'patient_name': '张三(开发模式)',
-                                'test_type': '阴道分泌物检查(模拟)',
-                                'patient_sex': '女',
-                                'birth_date': '1990-01-01',
-                                'patient_age': '33'
-                            }
-                            
+                        # 从PG中读取病人数据（已停用，仅保留代码供参考）
+                        # if config.VPN_MODE and pg_conn:
+                        #     logger.debug("尝试从PostgreSQL数据库获取患者信息")
+                        #     data = data_processing.check_patient_message(scanner_result, pg_conn)
+                        # else:
+                        logger.debug("VPN模式禁用，使用模拟患者数据")
+                        # 开发模式使用模拟数据
+                        data = {
+                            'patient_name': '张三(开发模式)',
+                            'test_type': '阴道分泌物检查(模拟)',
+                            'patient_sex': '女',
+                            'birth_date': '1990-01-01',
+                            'patient_age': '33'
+                        }
+
                         if data:
                             logger.info(f"获取到患者信息: {data['patient_name']}")
                             auto_input.autoscope.input_message(serial_number, data["patient_name"],
@@ -259,46 +259,46 @@ def main():
                         logger.error(f"处理体检系统条码异常: {str(e)}", exc_info=True)
                         error_window(f"处理体检系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
 
-                else:
-                    logger.info(f"检测到医院HIS系统条码: {scanner_result}")
-                    # HIS系统的流程
-                    try:
-                        # His系统
-                        # 生成序列号
-                        current_patient['serial_number'] += 1
-                        current_time = datetime.datetime.now().strftime("%Y%m%d")
-                        serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
-                        logger.info(f"生成新序列号: {serial_number}")
-
-                        if config.VPN_MODE:
-                            logger.debug("尝试从HIS系统获取患者信息")
-                            data = data_processing.check_patient_his_message(scanner_result)
-                        else:
-                            logger.debug("VPN模式禁用，使用模拟HIS患者数据")
-                            # 开发模式使用模拟数据
-                            data = {
-                                'patient_name': '李四(开发模式)',
-                                'visit_id': scanner_result,
-                                'patient_sex': '男',
-                                'birth_date': '1985-05-05',
-                                'patient_age': '38',
-                                'dept_name': '内科(模拟)',
-                                'dept_no': 'N001'
-                            }
-                            
-                        if data:
-                            logger.info(f"获取到患者信息: {data['patient_name']}")
-                            auto_input.xcope.input_message(serial_number, data["patient_name"],
-                                                        data["visit_id"], data["patient_sex"],
-                                                        data["birth_date"], data["patient_age"],
-                                                        data["dept_name"], data["dept_no"])
-                        else:
-                            logger.warning(f"未找到患者HIS信息: {scanner_result}")
-                            error_window(f"未找到患者HIS信息，请检查扫描条码是否正确\n条码: {scanner_result}", 500, 150)
-
-                    except Exception as e:
-                        logger.error(f"处理医院HIS系统条码异常: {str(e)}", exc_info=True)
-                        error_window(f"处理医院HIS系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
+                # else:
+                #     logger.info(f"检测到医院HIS系统条码: {scanner_result}")
+                #     # HIS系统的流程
+                #     try:
+                #         # His系统
+                #         # 生成序列号
+                #         current_patient['serial_number'] += 1
+                #         current_time = datetime.datetime.now().strftime("%Y%m%d")
+                #         serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
+                #         logger.info(f"生成新序列号: {serial_number}")
+                #
+                #         if config.VPN_MODE:
+                #             logger.debug("尝试从HIS系统获取患者信息")
+                #             data = data_processing.check_patient_his_message(scanner_result)
+                #         else:
+                #             logger.debug("VPN模式禁用，使用模拟HIS患者数据")
+                #             # 开发模式使用模拟数据
+                #             data = {
+                #                 'patient_name': '李四(开发模式)',
+                #                 'visit_id': scanner_result,
+                #                 'patient_sex': '男',
+                #                 'birth_date': '1985-05-05',
+                #                 'patient_age': '38',
+                #                 'dept_name': '内科(模拟)',
+                #                 'dept_no': 'N001'
+                #             }
+                #
+                #         if data:
+                #             logger.info(f"获取到患者信息: {data['patient_name']}")
+                #             auto_input.xcope.input_message(serial_number, data["patient_name"],
+                #                                         data["visit_id"], data["patient_sex"],
+                #                                         data["birth_date"], data["patient_age"],
+                #                                         data["dept_name"], data["dept_no"])
+                #         else:
+                #             logger.warning(f"未找到患者HIS信息: {scanner_result}")
+                #             error_window(f"未找到患者HIS信息，请检查扫描条码是否正确\n条码: {scanner_result}", 500, 150)
+                #
+                #     except Exception as e:
+                #         logger.error(f"处理医院HIS系统条码异常: {str(e)}", exc_info=True)
+                #         error_window(f"处理医院HIS系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
 
             except FailSafeException:
                 logger.warning("触发PyAutoGUI故障安全异常 - 鼠标移动到屏幕角落")
@@ -314,20 +314,20 @@ def main():
         error_window(f"程序异常退出\n异常信息: {str(e)}", 500, 150)
     finally:
         # 关闭连接
-        try:
-            if pg_conn:
-                pg_conn.close()
-                logger.info("PostgreSQL数据库连接已关闭")
-        except Exception as e:
-            logger.error(f"关闭数据库连接异常: {str(e)}")
-            
+        # try:
+        #     if pg_conn:
+        #         pg_conn.close()
+        #         logger.info("PostgreSQL数据库连接已关闭")
+        # except Exception as e:
+        #     logger.error(f"关闭数据库连接异常: {str(e)}")
+        #
         try:
             if 'qr_code_scanner' in locals() and qr_code_scanner:
                 qr_code_scanner.close()
                 logger.info("扫描器连接已关闭")
         except Exception as e:
             logger.error(f"关闭扫描器连接异常: {str(e)}")
-            
+
         logger.info("===== AutoLoader 程序结束 =====")
 
 

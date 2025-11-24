@@ -23,5 +23,10 @@ ENV/
 # IDE文件
 .idea/
 .vscode/
-*.swp# Oracle客户端目录
+*.swp
+
+# Oracle客户端目录
 instantclient-basic/
+
+# 忽略压缩包
+*.zip
