@@ -14,7 +14,7 @@ from pyautogui import FailSafeException
 
 import auto_input.autoscope
 import auto_input.xcope
-import config
+from app_config import config
 import scan.scanner
 import tray_task.tray_task
 from hospital_info import data_processing

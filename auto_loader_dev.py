@@ -13,7 +13,6 @@ import threading
 import time
 import sys
 
-# import psycopg2  # PostgreSQL 已停用，仅保留导入语句供参考
 import requests
 from pyautogui import FailSafeException
 
@@ -170,28 +169,6 @@ def main():
     # 用来存储序列号，在界面上显示
     current_patient = {'serial_number': 0}
 
-    # 连接pg（已停用，仅保留代码供参考）
-    # pg_conn = None
-    # if config.VPN_MODE:
-    #     logger.info(f"尝试连接PostgreSQL数据库 (主机: {config.POSTGRES_HOST}, 端口: {config.POSTGRES_PORT})...")
-    #     try:
-    #         pg_conn = psycopg2.connect(
-    #             host=config.POSTGRES_HOST,
-    #             port=config.POSTGRES_PORT,
-    #             user=config.POSTGRES_USERNAME,
-    #             password=config.POSTGRES_PASSWORD,
-    #             database=config.POSTGRES_DATABASE
-    #         )
-    #         logger.info("PostgreSQL数据库连接成功")
-    #     except Exception as e:
-    #         logger.critical(f"PostgreSQL数据库连接失败: {str(e)}")
-    #         error_window(f"连接PostgreSQL数据库发生异常，请检查网络连接或修改CONFIG.py中的参数\n"
-    #                     f"主机地址:{config.POSTGRES_HOST}, 端口:{config.POSTGRES_PORT}\n"
-    #                     f"异常信息: {str(e)}", 500, 200)
-    #         logger.info("程序退出 - 原因: 数据库连接失败")
-    #         return
-    # else:
-    #     logger.warning("VPN模式已禁用，跳过数据库连接")
 
     # 测试自动填表
     logger.info("测试自动填表功能...")
@@ -231,11 +208,7 @@ def main():
                         serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
                         logger.info(f"生成新序列号: {serial_number}")
                         
-                        # 从PG中读取病人数据（已停用，仅保留代码供参考）
-                        # if config.VPN_MODE and pg_conn:
-                        #     logger.debug("尝试从PostgreSQL数据库获取患者信息")
-                        #     data = data_processing.check_patient_message(scanner_result, pg_conn)
-                        # else:
+                        # 开发模式使用模拟数据
                         logger.debug("VPN模式禁用，使用模拟患者数据")
                         # 开发模式使用模拟数据
                         data = {
@@ -313,13 +286,6 @@ def main():
         logger.critical(f"程序异常退出: {str(e)}", exc_info=True)
         error_window(f"程序异常退出\n异常信息: {str(e)}", 500, 150)
     finally:
-        # 关闭连接
-        # try:
-        #     if pg_conn:
-        #         pg_conn.close()
-        #         logger.info("PostgreSQL数据库连接已关闭")
-        # except Exception as e:
-        #     logger.error(f"关闭数据库连接异常: {str(e)}")
         #
         try:
             if 'qr_code_scanner' in locals() and qr_code_scanner:
