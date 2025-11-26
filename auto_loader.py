@@ -7,6 +7,7 @@ import signal
 import threading
 import time
 import sys
+import queue
 
 # import psycopg2  # PostgreSQL 已停用，仅保留导入语句供参考
 import requests
@@ -32,6 +33,9 @@ _XCOPE_PROCESSED_IDS: set[str] = set()
 _XCOPE_LAST_SCANNER_CODE_LOCK = threading.Lock()
 _XCOPE_LAST_SCANNER_CODE: str | None = None
 
+# 扫码队列：按队列、一条码匹配一份新报告，使用线程安全的阻塞队列
+_XCOPE_SCANNER_CODE_QUEUE: queue.Queue[str] = queue.Queue()
+
 from window.prompt_dialog_box import error_window
 
 
@@ -50,9 +54,19 @@ def _ensure_xcope_client() -> XcopeClient | None:
 
 
 def _set_last_scanner_code(code: str) -> None:
+    """记录最近一次扫描条码，并放入队列，供 Xcope 轮询按队列精确匹配使用。"""
     global _XCOPE_LAST_SCANNER_CODE
+    code = (code or "").strip()
+    if not code:
+        return
     with _XCOPE_LAST_SCANNER_CODE_LOCK:
-        _XCOPE_LAST_SCANNER_CODE = code.strip()
+        _XCOPE_LAST_SCANNER_CODE = code
+    # 使用阻塞队列存放扫码结果；队列为空时，轮询线程会阻塞等待新条码
+    try:
+        _XCOPE_SCANNER_CODE_QUEUE.put_nowait(code)
+    except Exception as e:
+        # 理论上不会触发（未设置 maxsize），仅作为健壮性保护
+        logger.error(f"将条码加入扫码队列失败: {code}, 错误: {e}")
 
 
 def _get_last_scanner_code() -> str | None:
@@ -71,12 +85,19 @@ def _is_report_processed(report_id: str) -> bool:
 
 
 def _xcope_poll_worker() -> None:
-    """每3秒轮询一次 Xcope 报告列表并下载 PDF，去重处理。
+    """基于阻塞队列的 Xcope 报告轮询线程。
 
+    设计目标：
+    - 当有扫码条码进入队列时，线程立即被唤醒，立刻开始尝试匹配并下载报告；
+    - 当队列和待处理条码都为空时，线程阻塞等待新条码，不再固定每60秒轮询，避免无效请求；
+    - 使用 queue.Queue 保证线程安全，同时通过 timeout 处理队列为空、线程退出等场景，不出现空指针异常。
+
+    业务规则保持不变：
     - startDate/EndDate 为当天时间
-    - MaxResultCount 默认99999
-    - 使用获取到的条码作为PDF文件名，保存到 D:\\东华病理报告
-    - 报告和PDF根据 report Id 去重
+    - MaxResultCount 默认 99999
+    - 使用样本编号作为 PDF 文件名（若样本编号缺失则回退为报告 Id），保存到 D:\东华病理报告
+    - 报告和 PDF 根据 report Id 去重
+    - 通过 Xcope 报告中的“样本编号”等字段与扫码条码精确匹配，一条码对应一份新报告
     """
     logger.info("Xcope 报告轮询线程启动")
     client = _ensure_xcope_client()
@@ -89,60 +110,175 @@ def _xcope_poll_worker() -> None:
 
     register_client = RegisterDocumentClient()
 
+    # 挂起在内存中的“待匹配条码”列表：
+    # - 新扫码条码会被加入此列表
+    # - 若当前轮询未在报告列表中匹配到，将保留在此列表中，等待后续再次轮询
+    pending_barcodes: list[str] = []
+
+    # 有待匹配条码时的轮询间隔（秒），避免对 Xcope 接口造成过高压力
+    POLL_INTERVAL_SECONDS = 10
+    # 从队列中阻塞等待新条码的超时时间（秒），用于定期检查停止事件
+    QUEUE_WAIT_TIMEOUT_SECONDS = 1
+
     while not _XCOPE_POLL_STOP.is_set():
         try:
-            last_code = _get_last_scanner_code()
-            if not last_code:
-                # 当前还没有条码，不做任何事情
-                time.sleep(3)
+            # 1. 如果当前没有任何待匹配条码，则阻塞等待队列中出现新条码
+            if not pending_barcodes:
+                try:
+                    barcode_from_queue = _XCOPE_SCANNER_CODE_QUEUE.get(
+                        timeout=QUEUE_WAIT_TIMEOUT_SECONDS
+                    )
+                except queue.Empty:
+                    # 队列暂时为空，继续检查停止事件
+                    continue
+
+                barcode_from_queue = (barcode_from_queue or "").strip()
+                if barcode_from_queue:
+                    pending_barcodes.append(barcode_from_queue)
+                    logger.info(
+                        f"Xcope 轮询线程收到新条码: {barcode_from_queue}（当前待处理共 {len(pending_barcodes)} 条）"
+                    )
+                # 继续往下执行：立即进行一次轮询
+            else:
+                # 已经有待匹配条码的情况下，尽量一次性把队列里积压的条码取完
+                while True:
+                    try:
+                        more_code = _XCOPE_SCANNER_CODE_QUEUE.get_nowait()
+                    except queue.Empty:
+                        break
+                    more_code = (more_code or "").strip()
+                    if more_code:
+                        pending_barcodes.append(more_code)
+
+            if not pending_barcodes:
+                # 可能刚刚取到的都是空字符串，直接继续等待
                 continue
 
+            # 2. 拉取今日报告列表
             items = client.get_today_report_list(max_result_count=99999)
             logger.info(f"Xcope 今日报告总数: {len(items)}")
 
-            # 本轮需要反馈的平台文档信息列表（去重后）
-            to_register: list[dict] = []
-
+            # 预先过滤出未处理的报告，并缓存 report_id 方便后续使用
+            unprocessed_items: list[dict] = []
             for item in items:
                 report_id = str(item.get("Id") or "").strip()
                 if not report_id:
                     continue
                 if _is_report_processed(report_id):
                     continue
+                # 临时附加 report_id，便于后续使用
+                item["_report_id"] = report_id
+                unprocessed_items.append(item)
+
+            if not unprocessed_items:
+                # 当前没有任何尚未处理的报告：如果还有待匹配条码，稍后再重试；否则直接返回顶部阻塞等待新条码
+                if pending_barcodes:
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            # 本轮需要反馈的平台文档信息列表（去重后），以及成功匹配的条码列表
+            to_register: list[dict] = []
+            matched_barcodes: list[str] = []
+
+            def _extract_sample_code(report_item: dict) -> str:
+                """从 Xcope 报告中提取用于精确匹配条码的样本编号/标本编号等字段。"""
+                for key in ("样本编号", "标本编号", "样本号", "标本号"):
+                    value = str(report_item.get(key) or "").strip()
+                    if value:
+                        return value
+                return ""
+
+            # 3. 按 pending_barcodes 顺序，一条码精确匹配一份未处理报告
+            for barcode in list(pending_barcodes):
+                barcode = (barcode or "").strip()
+                if not barcode:
+                    continue
+
+                matched_index: int | None = None
+                for idx, report_item in enumerate(unprocessed_items):
+                    sample_code = _extract_sample_code(report_item)
+                    if sample_code and sample_code == barcode:
+                        matched_index = idx
+                        break
+
+                # 当前条码暂未在报告列表中找到匹配项，保留在 pending_barcodes 中，等待后续轮询
+                if matched_index is None:
+                    continue
+
+                matched_item = unprocessed_items.pop(matched_index)
+                report_id = matched_item.get("_report_id") or ""
+                report_id = str(report_id).strip()
+                if not report_id:
+                    logger.warning(f"匹配到的 Xcope 报告缺少 Id 字段，条码={barcode}")
+                    continue
+
+                # 使用样本编号作为 PDF 文件名的主体；如缺失则回退为报告 Id
+                sample_code_for_filename = _extract_sample_code(matched_item) or report_id
 
                 pdf_bytes = client.download_report_pdf(report_id)
                 if not pdf_bytes:
+                    logger.warning(f"下载 Xcope 报告 PDF 失败，报告Id={report_id}，条码={barcode}")
                     continue
 
-                # 使用最近一次扫码获取的条码和报告Id作为文件名，支持一条码多报告多文件
-                filename = f"{last_code}_{report_id}.pdf"
+                filename = f"{sample_code_for_filename}.pdf"
                 filepath = os.path.join(base_dir, filename)
 
                 try:
                     with open(filepath, "wb") as f:
                         f.write(pdf_bytes)
-                    logger.info(f"已保存 Xcope 报告 PDF: {filepath}")
+                    logger.info(f"已保存 Xcope 报告 PDF: {filepath}，条码={barcode}")
                     _mark_report_processed(report_id)
 
                     to_register.append(
                         {
                             "report_id": report_id,
                             "filepath": filepath,
-                            "item": item,
+                            "item": matched_item,
+                            "barcode": barcode,
                         }
                     )
+                    matched_barcodes.append(barcode)
                 except Exception as e:
-                    logger.error(f"保存 Xcope 报告 PDF 失败: {filepath}, 错误: {e}")
+                    logger.error(f"保存 Xcope 报告 PDF 失败: {filepath}，条码={barcode}，错误: {e}")
 
-            # 当列表数据全部操作完后，再调用反馈接口
+            # 4. 当列表数据全部操作完后，再调用反馈接口
             for info in to_register:
-                _register_document_for_report(register_client, info["report_id"], info["filepath"], info["item"], last_code)
+                _register_document_for_report(
+                    register_client,
+                    info["report_id"],
+                    info["filepath"],
+                    info["item"],
+                    info["barcode"],
+                )
+
+            # 5. 从 pending_barcodes 中移除已成功匹配并处理的条码（按出现次数移除，支持重复扫码场景）
+            if matched_barcodes:
+                remove_counts: dict[str, int] = {}
+                for c in matched_barcodes:
+                    c = (c or "").strip()
+                    if not c:
+                        continue
+                    remove_counts[c] = remove_counts.get(c, 0) + 1
+
+                if remove_counts:
+                    new_pending: list[str] = []
+                    for c in pending_barcodes:
+                        count = remove_counts.get(c, 0)
+                        if count > 0:
+                            # 消耗一次该条码
+                            remove_counts[c] = count - 1
+                            continue
+                        new_pending.append(c)
+                    pending_barcodes = new_pending
+
+            # 6. 如果还有未匹配成功的条码，等待一小段时间后再次轮询；否则回到顶部阻塞等待新条码
+            if pending_barcodes:
+                time.sleep(POLL_INTERVAL_SECONDS)
 
         except Exception as e:
             logger.error(f"Xcope 报告轮询线程异常: {e}", exc_info=True)
-
-        # 每3秒执行一次
-        time.sleep(3)
+            # 出现异常时适当休眠，避免异常情况下的忙等
+            time.sleep(POLL_INTERVAL_SECONDS)
 
 
 
@@ -302,25 +438,25 @@ def main():
 
     # 连接oracle
     # 尝试编辑xcope
-    logger.info("测试自动填表功能...")
-    try:
-        # 使用测试数据测试自动填表功能
-        auto_input.xcope.xcope_input(
-            xm="测试姓名",
-            nl="30",
-            zlkh="TEST001",
-            ybbh="YB001",
-            ch="101",
-            bbzl="血液",
-            sjys="测试医生",
-            sjks="测试科室"
-        )
-        logger.info("自动填表功能测试成功")
-    except Exception as e:
-        logger.error(f"自动填表测试失败: {str(e)}")
-        error_window(f"自动填表测试失败，请检查系统环境\n"
-                     f"异常信息: {str(e)}\n"
-                     f"程序将继续运行，但可能无法正常工作", 500, 200)
+    # logger.info("测试自动填表功能...")
+    # try:
+    #     # 使用测试数据测试自动填表功能
+    #     auto_input.xcope.xcope_input(
+    #         xm="测试姓名",
+    #         nl="30",
+    #         zlkh="TEST001",
+    #         ybbh="YB001",
+    #         ch="101",
+    #         bbzl="血液",
+    #         sjys="测试医生",
+    #         sjks="测试科室"
+    #     )
+    #     logger.info("自动填表功能测试成功")
+    # except Exception as e:
+    #     logger.error(f"自动填表测试失败: {str(e)}")
+    #     error_window(f"自动填表测试失败，请检查系统环境\n"
+    #                  f"异常信息: {str(e)}\n"
+    #                  f"程序将继续运行，但可能无法正常工作", 500, 200)
 
     # 启动 Xcope 报告轮询线程
     global _XCOPE_POLL_THREAD
@@ -387,7 +523,7 @@ def main():
                             "POST",
                             his_url,
                             1,
-                            10,
+                            3,
                             verify=False,
                             headers=headers,
                             data=form_data,
