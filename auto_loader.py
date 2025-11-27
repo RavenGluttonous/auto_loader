@@ -36,6 +36,10 @@ _XCOPE_LAST_SCANNER_CODE: str | None = None
 # 扫码队列：按队列、一条码匹配一份新报告，使用线程安全的阻塞队列
 _XCOPE_SCANNER_CODE_QUEUE: queue.Queue[str] = queue.Queue()
 
+# 条码长度控制：正常条码基准长度约为 10 位，超过 1.5 倍认为可能是连续扫码被拼接
+_BARCODE_BASE_LENGTH = 10
+_BARCODE_MAX_LENGTH = int(_BARCODE_BASE_LENGTH * 1.5)  # 目前为 15
+
 from window.prompt_dialog_box import error_window
 
 
@@ -471,17 +475,36 @@ def main():
         while True:
             try:
                 # 获取扫描的内容
-                scanner_result = qr_code_scanner.get_scanner_content()
-                logger.info(f"扫描器输入: {scanner_result}")
+                scanner_result_raw = qr_code_scanner.get_scanner_content()
+                logger.info(f"扫描器输入: {scanner_result_raw!r}")
 
-                # 记录最近一次扫描条码，供 Xcope 报告下载命名使用
-                _set_last_scanner_code(scanner_result)
+                # 标准化扫描结果（去掉首尾空白/换行）
+                scanner_result = (scanner_result_raw or "").strip()
+                if not scanner_result:
+                    logger.warning("扫描器返回空内容，本次扫描将被忽略")
+                    continue
 
-                # 检查是否为回退特殊指令
+                # 检查是否为回退特殊指令（不作为条码入队）
                 if scanner_result == "AutoLoaderRollback":
                     current_patient['serial_number'] -= 1
                     logger.info(f"执行回退操作，当前序号变更为: {current_patient['serial_number']}")
                     continue
+
+                # 长度校验：长度过长时认为是连续扫码导致的拼接，提示用户重新扫码，并丢弃本次结果
+                if len(scanner_result) >= _BARCODE_MAX_LENGTH:
+                    logger.warning(
+                        f"检测到疑似连续扫码导致的异常条码，长度={len(scanner_result)}，内容={scanner_result!r}，本次将丢弃"
+                    )
+                    error_window(
+                        "扫码速度过快，检测到条码长度异常。\n\n"
+                        "请稍后重新扫码，注意两次扫码之间留出一点时间。",
+                        900,
+                        270,
+                    )
+                    continue
+
+                # 记录最近一次扫描条码，供 Xcope 报告下载命名和轮询使用
+                _set_last_scanner_code(scanner_result)
 
                 # 体检系统条码（不再校验是否以 TJ 开头，任意条码均按体检流程处理）
                 logger.info(f"检测到体检系统条码: {scanner_result}")
