@@ -38,6 +38,8 @@ class RegisterDocumentClient:
 
         返回 True 表示 ResultCode == "0"
         """
+
+        # 内部业务 XML，请求结构与东华《文档注册》接口文档一致
         request_xml = f"""<Request>
     <Header>
         <SourceSystem>{source_system}</SourceSystem>
@@ -64,11 +66,18 @@ class RegisterDocumentClient:
     </Body>
 </Request>"""
 
-        form_data = {
-            "input1": self.service_code,
-            "input2": request_xml,
-        }
-        headers = {"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"}
+        # 按 MES0201 的 SoapUI 示例，文档注册同样通过 SOAP Envelope 调用 HIPMessageServer
+        soap_envelope = f"""<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:dhcc=\"http://www.dhcc.com.cn\">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <dhcc:HIPMessageServer>
+         <dhcc:input1>{self.service_code}</dhcc:input1>
+         <dhcc:input2><![CDATA[{request_xml}]]></dhcc:input2>
+      </dhcc:HIPMessageServer>
+   </soapenv:Body>
+</soapenv:Envelope>"""
+
+        headers = {"Content-Type": "text/xml; charset=utf-8"}
 
         try:
             resp = http_request.get_response(
@@ -78,10 +87,10 @@ class RegisterDocumentClient:
                 3,
                 verify=False,
                 headers=headers,
-                data=form_data,
+                data=soap_envelope,
             )
         except requests.RequestException as e:
-            logger.error(f"调用文档注册接口异常: {e}")
+            logger.error(f"调用文档注册接口异常: {e}")
             return False
 
         if resp is None:
@@ -91,7 +100,9 @@ class RegisterDocumentClient:
         try:
             xml_dict = data_processing.xml_to_dict(resp.text)
         except Exception as e:
-            logger.error(f"解析文档注册接口返回XML失败: {e}, 原始内容: {resp.text[:500]}")
+            logger.error(
+                f"解析文档注册接口返回XML失败: {e}, 原始内容: {resp.text[:500]}"
+            )
             return False
 
         body = xml_dict.get("Response", {}).get("Body", {})
@@ -103,4 +114,3 @@ class RegisterDocumentClient:
         else:
             logger.error(f"文档注册失败: {result_code} {result_content}")
             return False
-
