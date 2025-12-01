@@ -518,27 +518,34 @@ def main():
                     logger.info(f"生成新序列号: {serial_number}")
 
                     # 调用东华 MES0201 接口（申请信息列表）获取患者信息
-                    # 构造业务请求 XML，请根据医院实际情况调整 SourceSystem/CardTypes/ExeLoc/EpsiodeType
+                    # 按对方在 SoapUI 中通过测试的示例，先构造内部业务 XML，再封装到 SOAP Envelope 中
                     request_xml = f"""<Request>
     <Header>
-        <SourceSystem>AutoLoader</SourceSystem>
+        <SourceSystem>RuiKe</SourceSystem>
         <MessageID>{serial_number}</MessageID>
     </Header>
     <Body>
         <CardValue>{scanner_result}</CardValue>
         <CardTypes>2</CardTypes>
-        <ExeLoc>静秀路放射科</ExeLoc>
-        <EpsiodeType>O</EpsiodeType>
+        <ExeLoc>静秀路病理科</ExeLoc>
+        <EpsiodeType>I</EpsiodeType>
     </Body>
 </Request>"""
 
+                    # SOAP 1.1 Envelope，请求体结构与对方 SoapUI 示例保持一致
+                    soap_envelope = f"""<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:dhcc=\"http://www.dhcc.com.cn\">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <dhcc:HIPMessageServer>
+         <dhcc:input1>MES0201</dhcc:input1>
+         <dhcc:input2><![CDATA[{request_xml}]]></dhcc:input2>
+      </dhcc:HIPMessageServer>
+   </soapenv:Body>
+</soapenv:Envelope>"""
+
                     his_url = "https://192.168.206.193:1443/csp/hsb/DHC.Published.PISWebService.BS.PISWebService.CLS"
-                    form_data = {
-                        "input1": "MES0201",  # 服务编码: 申请信息列表
-                        "input2": request_xml,  # 业务请求XML
-                    }
                     headers = {
-                        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8"
+                        "Content-Type": "text/xml; charset=utf-8",
                     }
 
                     try:
@@ -549,7 +556,7 @@ def main():
                             3,
                             verify=False,
                             headers=headers,
-                            data=form_data,
+                            data=soap_envelope,
                         )
                     except requests.exceptions.RequestException as e:
                         logger.error(f"调用HIS申请信息列表接口失败: {str(e)}")
