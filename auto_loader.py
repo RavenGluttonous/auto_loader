@@ -615,6 +615,9 @@ def main():
                     his_url = "https://192.168.206.193:1443/csp/hsb/DHC.Published.PISWebService.BS.PISWebService.CLS"
                     headers = {
                         "Content-Type": "text/xml; charset=utf-8",
+                        # 按照 SOAP 1.1 规范和对方 WSDL 约定，补充 SOAPAction 头；
+                        # 典型写法为 "http://www.dhcc.com.cn/HIPMessageServer"，两侧带引号与 SoapUI 一致
+                        "SOAPAction": "\"http://www.dhcc.com.cn/HIPMessageServer\"",
                     }
 
                     try:

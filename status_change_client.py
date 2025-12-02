@@ -113,7 +113,12 @@ class StatusChangeClient:
    </soapenv:Body>
 </soapenv:Envelope>"""
 
-        headers = {"Content-Type": "text/xml; charset=utf-8"}
+        headers = {
+            "Content-Type": "text/xml; charset=utf-8",
+            # SOAP 1.1 规范要求的 SOAPAction 头，按照命名空间 + 方法名约定
+            # 与对方 SoapUI 示例保持一致，使用 "http://www.dhcc.com.cn/HIPMessageServer"
+            "SOAPAction": "\"http://www.dhcc.com.cn/HIPMessageServer\"",
+        }
 
         try:
             resp = http_request.get_response(
