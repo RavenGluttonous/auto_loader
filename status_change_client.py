@@ -58,7 +58,9 @@ class StatusChangeClient:
         """
 
         if not status_params:
-            logger.warning("StatusChangeClient.send_status_change 调用时 status_params 为空，跳过发送")
+            logger.warning(
+                "StatusChangeClient.send_status_change 调用时 status_params 为空，跳过发送"
+            )
             return False
 
         # 组装多个 <StatusParameter> 节点
@@ -139,14 +141,20 @@ class StatusChangeClient:
             return False
 
         try:
-            xml_dict = data_processing.xml_to_dict(resp.text)
+            response_node = data_processing.parse_dhcc_hip_response(resp.text)
         except Exception as e:
             logger.error(
                 f"解析状态变更回传接口返回XML失败: {e}, 原始内容: {resp.text[:500]}"
             )
             return False
 
-        body = xml_dict.get("Response", {}).get("Body", {})
+        if not response_node:
+            logger.error(
+                f"解析状态变更回传接口返回XML失败: 未能解析到<Response>节点, 原始内容: {resp.text[:500]}"
+            )
+            return False
+
+        body = response_node.get("Body", {})
         result_code = str(body.get("ResultCode", "")).strip()
         result_content = body.get("ResultContent", "")
         if result_code == "0":

@@ -653,13 +653,18 @@ def main():
                         logger.warning(f"记录HIS原始响应内容时发生异常: {e}")
 
                     try:
-                        xml_dict = data_processing.xml_to_dict(response.text)
+                        response_node = data_processing.parse_dhcc_hip_response(response.text)
                     except Exception as e:
                         logger.error(f"解析HIS返回XML失败: {str(e)}")
                         error_window("HIS返回数据格式错误，错误码:4", 900, 270)
                         continue
 
-                    body = xml_dict.get("Response", {}).get("Body", {})
+                    if not response_node:
+                        logger.error("HIS返回数据格式错误：未能解析到<Response>节点")
+                        error_window("HIS返回数据格式错误，错误码:4", 900, 270)
+                        continue
+
+                    body = response_node.get("Body", {})
                     result_code = str(body.get("ResultCode", "")).strip()
                     if result_code != "0":
                         result_content = body.get("ResultContent", "未知错误")

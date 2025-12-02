@@ -34,9 +34,9 @@ class RegisterDocumentClient:
         update_time: str,
         source_system: str = "AutoLoader",
     ) -> bool:
-        """调用文档注册接口
+        """调用文档注册接口。
 
-        返回 True 表示 ResultCode == "0"
+        返回 True 表示 ResultCode == "0"。
         """
 
         # 内部业务 XML，请求结构与东华《文档注册》接口文档一致
@@ -103,14 +103,20 @@ class RegisterDocumentClient:
             return False
 
         try:
-            xml_dict = data_processing.xml_to_dict(resp.text)
+            response_node = data_processing.parse_dhcc_hip_response(resp.text)
         except Exception as e:
             logger.error(
                 f"解析文档注册接口返回XML失败: {e}, 原始内容: {resp.text[:500]}"
             )
             return False
 
-        body = xml_dict.get("Response", {}).get("Body", {})
+        if not response_node:
+            logger.error(
+                f"解析文档注册接口返回XML失败: 未能解析到<Response>节点, 原始内容: {resp.text[:500]}"
+            )
+            return False
+
+        body = response_node.get("Body", {})
         result_code = str(body.get("ResultCode", "")).strip()
         result_content = body.get("ResultContent", "")
         if result_code == "0":
