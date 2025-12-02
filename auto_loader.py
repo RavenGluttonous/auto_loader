@@ -37,6 +37,10 @@ _XCOPE_LAST_SCANNER_CODE: str | None = None
 # 扫码队列：按队列、一条码匹配一份新报告，使用线程安全的阻塞队列
 _XCOPE_SCANNER_CODE_QUEUE: queue.Queue[str] = queue.Queue()
 
+# 条码与申请单号(RISRAppNum)映射表，用于在保存 PDF 时按申请单号命名
+_RISR_APP_NUM_MAP_LOCK = threading.Lock()
+_RISR_APP_NUM_MAP: dict[str, str] = {}
+
 # 条码长度控制：正常条码基准长度约为 10 位，超过 1.5 倍认为可能是连续扫码被拼接
 _BARCODE_BASE_LENGTH = 10
 _BARCODE_MAX_LENGTH = int(_BARCODE_BASE_LENGTH * 1.5)  # 目前为 15
@@ -74,6 +78,25 @@ def _set_last_scanner_code(code: str) -> None:
         logger.error(f"将条码加入扫码队列失败: {code}, 错误: {e}")
 
 
+def _set_risr_app_num_for_barcode(barcode: str, app_num: str) -> None:
+    """为给定条码记录对应的申请单号(RISRAppNum)。"""
+    barcode = (barcode or "").strip()
+    app_num = (app_num or "").strip()
+    if not barcode or not app_num:
+        return
+    with _RISR_APP_NUM_MAP_LOCK:
+        _RISR_APP_NUM_MAP[barcode] = app_num
+
+
+def _get_risr_app_num_for_barcode(barcode: str) -> str | None:
+    """根据条码获取对应的申请单号(RISRAppNum)。"""
+    barcode = (barcode or "").strip()
+    if not barcode:
+        return None
+    with _RISR_APP_NUM_MAP_LOCK:
+        return _RISR_APP_NUM_MAP.get(barcode)
+
+
 def _get_last_scanner_code() -> str | None:
     with _XCOPE_LAST_SCANNER_CODE_LOCK:
         return _XCOPE_LAST_SCANNER_CODE
@@ -97,12 +120,12 @@ def _xcope_poll_worker() -> None:
     - 当队列和待处理条码都为空时，线程阻塞等待新条码，不再固定每60秒轮询，避免无效请求；
     - 使用 queue.Queue 保证线程安全，同时通过 timeout 处理队列为空、线程退出等场景，不出现空指针异常。
 
-    业务规则保持不变：
-    - startDate/EndDate 为当天时间
-    - MaxResultCount 默认 99999
-    - 使用样本编号作为 PDF 文件名（若样本编号缺失则回退为报告 Id），保存到 D:\东华病理报告
-    - 报告和 PDF 根据 report Id 去重
-    - 通过 Xcope 报告中的“样本编号”等字段与扫码条码精确匹配，一条码对应一份新报告
+	    业务规则保持不变：
+	    - startDate/EndDate 为当天时间
+	    - MaxResultCount 默认 99999
+	    - 使用申请单号(RISRAppNum)作为 PDF 文件名（若申请单号缺失则回退为样本编号，再回退为报告 Id），保存到 D:\东华病理报告
+	    - 报告和 PDF 根据 report Id 去重
+	    - 通过 Xcope 报告中的“样本编号”等字段与扫码条码精确匹配，一条码对应一份新报告
     """
     logger.info("Xcope 报告轮询线程启动")
     client = _ensure_xcope_client()
@@ -207,10 +230,10 @@ def _xcope_poll_worker() -> None:
                         matched_index = idx
                         break
 
-                # 当前条码暂未在报告列表中找到匹配项，保留在 pending_barcodes 中，等待后续轮询
+	                # 当前条码暂未在报告列表中找到匹配项，保留在 pending_barcodes 中，等待后续轮询
                 if matched_index is None:
                     continue
-
+	
                 matched_item = unprocessed_items.pop(matched_index)
                 report_id = matched_item.get("_report_id") or ""
                 report_id = str(report_id).strip()
@@ -218,15 +241,21 @@ def _xcope_poll_worker() -> None:
                     logger.warning(f"匹配到的 Xcope 报告缺少 Id 字段，条码={barcode}")
                     continue
 
-                # 使用样本编号作为 PDF 文件名的主体；如缺失则回退为报告 Id
-                sample_code_for_filename = _extract_sample_code(matched_item) or report_id
+                # 优先使用申请信息列表接口返回的申请单号(RISRAppNum)作为 PDF 文件名；
+                # 如未能获取申请单号，则回退为样本编号，再回退为报告 Id
+                app_num_for_filename = _get_risr_app_num_for_barcode(barcode)
+                if app_num_for_filename:
+                    filename_base = app_num_for_filename
+                else:
+                    sample_code_for_filename = _extract_sample_code(matched_item) or report_id
+                    filename_base = sample_code_for_filename
 
                 pdf_bytes = client.download_report_pdf(report_id)
                 if not pdf_bytes:
                     logger.warning(f"下载 Xcope 报告 PDF 失败，报告Id={report_id}，条码={barcode}")
                     continue
 
-                filename = f"{sample_code_for_filename}.pdf"
+                filename = f"{filename_base}.pdf"
                 filepath = os.path.join(base_dir, filename)
 
                 try:
@@ -457,12 +486,6 @@ def check_end_mark():
             print(f"没有匹配到任何参数,原始数据为:{repr(data)}")
             logger.warning(f"扫描器设置检查异常，未匹配到预期内容，原始数据为:{repr(data)}")
 
-
-# def is_tj_starting(string):
-#     pattern = r"^TJ"
-#     return bool(re.match(pattern, string))
-
-
 @logger.log_function_call()  # 使用日志装饰器记录函数调用
 def main():
     # 初始化日志系统
@@ -507,47 +530,6 @@ def main():
 
     # 用来存储序列号，在界面上显示
     current_patient = {'serial_number': 0}
-
-    # 连接pg（已停用，仅保留代码供参考）
-    # logger.info(f"连接PostgreSQL数据库 (主机: {config.POSTGRES_HOST}, 端口: {config.POSTGRES_PORT})...")
-    # try:
-    #     pg_conn = psycopg2.connect(
-    #         host=config.POSTGRES_HOST,
-    #         port=config.POSTGRES_PORT,
-    #         user=config.POSTGRES_USERNAME,
-    #         password=config.POSTGRES_PASSWORD,
-    #         database=config.POSTGRES_DATABASE
-    #     )
-    #     logger.info("PostgreSQL数据库连接成功")
-    # except Exception as e:
-    #     logger.critical(f"PostgreSQL数据库连接失败: {str(e)}")
-    #     error_window(f"连接PostgreSQL数据库发生异常，请检查网络连接或修改CONFIG.py中的参数\n"
-    #                  f"主机地址:{config.POSTGRES_HOST}, 端口:{config.POSTGRES_PORT}\n"
-    #                  f"异常信息: {str(e)}", 500, 200)
-    #     logger.info("程序退出 - 原因: 数据库连接失败")
-    #     return
-
-    # 连接oracle
-    # 尝试编辑xcope
-    # logger.info("测试自动填表功能...")
-    # try:
-    #     # 使用测试数据测试自动填表功能
-    #     auto_input.xcope.xcope_input(
-    #         xm="测试姓名",
-    #         nl="30",
-    #         zlkh="TEST001",
-    #         ybbh="YB001",
-    #         ch="101",
-    #         bbzl="血液",
-    #         sjys="测试医生",
-    #         sjks="测试科室"
-    #     )
-    #     logger.info("自动填表功能测试成功")
-    # except Exception as e:
-    #     logger.error(f"自动填表测试失败: {str(e)}")
-    #     error_window(f"自动填表测试失败，请检查系统环境\n"
-    #                  f"异常信息: {str(e)}\n"
-    #                  f"程序将继续运行，但可能无法正常工作", 500, 200)
 
     # 启动 Xcope 报告轮询线程
     global _XCOPE_POLL_THREAD
@@ -681,6 +663,11 @@ def main():
                     else:
                         first_order = pat_ord_lists
 
+	                    # 记录当前条码对应的申请单号(RISRAppNum)
+                    app_num = str(first_order.get("RISRAppNum") or "").strip()
+                    if app_num:
+                        _set_risr_app_num_for_barcode(scanner_result, app_num)
+	
                     xcope_xm = first_order.get("PATName") or ""
                     xcope_nl = first_order.get("PATAge") or ""
                     # 这里优先使用登记号作为诊疗卡号，如有需要可根据医院要求调整
@@ -708,118 +695,6 @@ def main():
                     logger.error(f"处理体检系统条码异常: {str(e)}", exc_info=True)
                     error_window(f"处理体检系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
 
-                # else:
-                #     logger.info(f"检测到医院HIS系统条码: {scanner_result}")
-                #     # HIS系统的流程
-                #     try:
-                #         # His系统
-                #         # 生成序列号
-                #         current_patient['serial_number'] += 1
-                #         current_time = datetime.datetime.now().strftime("%Y%m%d")
-                #         serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
-                #         logger.info(f"生成新序列号: {serial_number}")
-                #
-                #         # 首先检查表是否存在
-                #         check_table_sql = """
-                #             SELECT EXISTS (
-                #                 SELECT 1
-                #                 FROM information_schema.tables
-                #                 WHERE table_schema = 'vela_jc'
-                #                 AND table_name = 'jc_sq_shenqingdan'
-                #             );
-                #         """
-                #         try:
-                #             cursor = pg_conn.cursor()
-                #             cursor.execute(check_table_sql)
-                #             table_exists = cursor.fetchone()[0]
-                #
-                #             if not table_exists:
-                #                 logger.error("所需的表vela_jc.jc_sq_shenqingdan不存在")
-                #                 error_window("数据库缺少必要的表，请联系管理员检查数据库配置", 900, 300)
-                #                 cursor.close()
-                #                 continue
-                #
-                #             # 如果表存在，先获取列名
-                #             columns_sql = """
-                #                 SELECT column_name
-                #                 FROM information_schema.columns
-                #                 WHERE table_schema = 'vela_jc'
-                #                 AND table_name = 'jc_sq_shenqingdan'
-                #                 ORDER BY ordinal_position;
-                #             """
-                #             cursor.execute(columns_sql)
-                #             columns = [col[0] for col in cursor.fetchall()]
-                #             logger.info(f"表字段名称: {', '.join(columns)}")
-                #
-                #             # 执行查询
-                #             sql = f"""
-                #                 SELECT * FROM vela_jc.jc_sq_shenqingdan
-                #                 WHERE jiuzhenkh = '{scanner_result}'
-                #                 AND zuofeibz = 0  -- 未作废的记录
-                #                 ORDER BY chuangjiansj DESC  -- 按创建时间倒序
-                #                 LIMIT 1  -- 只取最新的一条
-                #             """
-                #             cursor.execute(sql)
-                #             patient_infos = cursor.fetchall()
-                #
-                #             # 如果有数据，打印第一条记录的所有字段值
-                #             if patient_infos:
-                #                 logger.info("查询结果的第一条记录:")
-                #                 for idx, col in enumerate(columns):
-                #                     logger.info(f"{col}: {patient_infos[0][idx]}")
-                #
-                #             cursor.close()
-                #             # 提交事务
-                #             pg_conn.commit()
-                #
-                #         except Exception as e:
-                #             logger.error(f"数据库查询失败: {str(e)}")
-                #             error_window(f"数据库查询失败，请检查数据库配置\n异常信息: {str(e)}", 900, 300)
-                #             # 回滚事务
-                #             pg_conn.rollback()
-                #             if cursor and not cursor.closed:
-                #                 cursor.close()
-                #             continue
-                #
-                #         length = len(patient_infos)
-                #         if length == 1:
-                #             patient_info = patient_infos[0]
-                #             # 根据实际的字段位置获取数据
-                #             xcope_xm = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'xingming')
-                #             xcope_nl = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'nianling')
-                #             xcope_zlkh = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'jiuzhenkh')
-                #             xcope_sjys = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'kaidanrxm')
-                #             xcope_sjks = next(patient_info[idx] for idx, col in enumerate(columns) if col == 'kaidanksmc')
-                #             xcope_ybbh = f"M{current_time[:4]}{str(current_patient['serial_number']).zfill(5)}"
-                #
-                #             try:
-                #                 auto_input.xcope.xcope_input(
-                #                     xm=xcope_xm,
-                #                     nl=str(xcope_nl),  # 确保转换为字符串
-                #                     zlkh=xcope_zlkh,
-                #                     sjys=xcope_sjys,
-                #                     sjks=xcope_sjks,
-                #                     ybbh=xcope_ybbh
-                #                 )
-                #                 logger.info(f"自动填表成功: {xcope_xm}")
-                #             except FailSafeException:
-                #                 logger.warning("自动填表过程中检测到鼠标移动到屏幕角落")
-                #                 error_window("自动输入过程，鼠标光标请不要移动到屏幕的四个角落，请移动回正确位置再重新扫描。", 900, 300)
-                #                 continue
-                #
-                #         elif length == 0:
-                #             logger.warning(f"未找到患者信息: {scanner_result}")
-                #             error_window("该号码在数据库查询不到", 600, 270)
-                #             continue
-                #         else:
-                #             logger.warning(f"找到多个患者记录: {scanner_result}")
-                #             error_window("该号码在数据库存在多个,无法自动输入", 600, 270)
-                #             continue
-                #
-                #     except Exception as e:
-                #         logger.error(f"处理医院HIS系统条码异常: {str(e)}", exc_info=True)
-                #         error_window(f"处理医院HIS系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
-
             except FailSafeException:
                 logger.warning("触发PyAutoGUI故障安全异常 - 鼠标移动到屏幕角落")
                 error_window("自动填表过程中检测到鼠标移动到屏幕角落，自动操作已中断\n请避免在操作过程中移动鼠标", 500, 150)
@@ -833,14 +708,7 @@ def main():
         logger.critical(f"程序异常退出: {str(e)}", exc_info=True)
         error_window(f"程序异常退出\n异常信息: {str(e)}", 500, 150)
     finally:
-        # 关闭连接
-        # try:
-        #     if 'pg_conn' in locals() and pg_conn:
-        #         pg_conn.close()
-        #         logger.info("PostgreSQL数据库连接已关闭")
-        # except Exception as e:
-        #     logger.error(f"关闭数据库连接异常: {str(e)}")
-        #
+        # 关闭扫描器连接
         try:
             if 'qr_code_scanner' in locals() and qr_code_scanner:
                 qr_code_scanner.close()
