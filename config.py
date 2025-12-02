@@ -17,3 +17,16 @@ XCOPE_BASE_URL = "http://127.0.0.1:9601"
 XCOPE_CLIENT_ID = "Xcope_ExternalApi"
 XCOPE_CLIENT_SECRET = "123456"
 XCOPE_SCOPE = "Xcope"
+
+
+# 状态变更回传接口(MES0167)操作人配置
+# JSON 结构：数组类型，元素数量 1..N，可按需增删，代码中当前默认取第一个元素
+# 每个元素包含：
+# - UpdateUserCode：更新人工号
+# - UpdateUserName：更新人姓名
+STATUS_UPDATE_USERS = [
+    {
+        "UpdateUserCode": "AutoLoader",
+        "UpdateUserName": "AutoLoader",
+    },
+]

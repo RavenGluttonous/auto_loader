@@ -363,6 +363,24 @@ def _register_document_for_report(
                 or ""
             )
 
+            # 从配置文件中获取状态变更的更新人信息（UpdateUserCode/UpdateUserName）
+            update_user_code = "AutoLoader"
+            update_user_name = "AutoLoader"
+            try:
+                users_cfg = getattr(config, "STATUS_UPDATE_USERS", None)
+                if isinstance(users_cfg, list) and users_cfg:
+                    first_user = users_cfg[0]
+                    if isinstance(first_user, dict):
+                        update_user_code = str(
+                            first_user.get("UpdateUserCode", update_user_code)
+                        )
+                        update_user_name = str(
+                            first_user.get("UpdateUserName", update_user_name)
+                        )
+            except Exception:
+                # 配置异常时回退到默认值，避免中断闭环逻辑
+                pass
+
             status_param = {
                 "PATPatientID": pat_patient_id,
                 "PAADMVisitNumber": paadm_visit_number,
@@ -374,11 +392,11 @@ def _register_document_for_report(
                 "Position": "",
                 "OperAppID": "",
                 "BloodAppID": "",
-                "BloodBagNo": "",
-                "ConsultAppID": "",
-                "StatusCode": "RP",  # 报告完成
-                "UpdateUserCode": "AutoLoader",
-                "UpdateUserName": "AutoLoader",
+	                "BloodBagNo": "",
+	                "ConsultAppID": "",
+	                "StatusCode": "RP",  # 报告完成
+	                "UpdateUserCode": update_user_code,
+	                "UpdateUserName": update_user_name,
                 "UpdateDateTime": update_datetime,
                 "ESOperateDeptCode": "",
                 "ESOperateDept": "",
