@@ -23,6 +23,7 @@ from utils import http_request
 from utils import logger  # 导入新的日志模块
 from xcope_client import XcopeClient
 from register_document_client import RegisterDocumentClient
+from status_change_client import StatusChangeClient
 
 # Xcope 报告轮询相关全局变量
 _XCOPE_CLIENT: XcopeClient | None = None
@@ -113,6 +114,7 @@ def _xcope_poll_worker() -> None:
     os.makedirs(base_dir, exist_ok=True)
 
     register_client = RegisterDocumentClient()
+    status_client = StatusChangeClient()
 
     # 挂起在内存中的“待匹配条码”列表：
     # - 新扫码条码会被加入此列表
@@ -249,6 +251,7 @@ def _xcope_poll_worker() -> None:
             for info in to_register:
                 _register_document_for_report(
                     register_client,
+                    status_client,
                     info["report_id"],
                     info["filepath"],
                     info["item"],
@@ -286,13 +289,21 @@ def _xcope_poll_worker() -> None:
 
 
 
-def _register_document_for_report(register_client: RegisterDocumentClient, report_id: str, filepath: str, item: dict, barcode: str) -> None:
-    """将单条报告使用 RegisterDocument 反馈给医院平台。
+def _register_document_for_report(
+    register_client: RegisterDocumentClient,
+    status_client: StatusChangeClient,
+    report_id: str,
+    filepath: str,
+    item: dict,
+    barcode: str,
+) -> None:
+    """将单条报告使用 RegisterDocument 反馈给医院平台，并在成功后回传状态变更(MES0167)。
 
     当前实现：
     - 使用 Xcope 报告 Id 作为 DocumentID
     - 使用本地 PDF 路径作为 DocumentPath（后续可根据医院平台要求改为HTTP地址）
     - 其他字段从 item 中尽量提取，如获取不到则置空
+    - 文档注册成功后，调用 MES0167 状态变更回传接口，上报状态代码 RP（报告完成）
     """
     try:
         # 生成消息ID、日期、时间
@@ -339,7 +350,62 @@ def _register_document_for_report(register_client: RegisterDocumentClient, repor
 
         if success:
             logger.info(f"文档注册成功，报告Id={report_id}，条码={barcode}")
-            # 注册成功后，删除本地PDF文件，避免磁盘堆积
+
+            # 文档注册成功后，按病理闭环要求回传状态变更（MES0167），状态代码示例使用 RP（报告完成）
+            status_message_id = f"STS-{now.strftime('%Y%m%d%H%M%S')}-{report_id}"
+            update_datetime = now.strftime("%Y-%m-%d %H:%M:%S")
+
+            # 尝试从 Xcope 报告中获取检查号等字段，如无对应字段可按实际医院字段名调整
+            risr_exam_id = str(
+                item.get("检查号")
+                or item.get("RISRExamID")
+                or item.get("申请单号")
+                or ""
+            )
+
+            status_param = {
+                "PATPatientID": pat_patient_id,
+                "PAADMVisitNumber": paadm_visit_number,
+                "OEORIOrderItemID": oeori_order_item_id,
+                "OEORIOrdExecID": "",
+                "SpecimenID": specimen_id,
+                "RISRExamID": risr_exam_id,
+                "RISRSystemType": "PIS",  # 病理系统类型，具体取值可按医院附录配置调整
+                "Position": "",
+                "OperAppID": "",
+                "BloodAppID": "",
+                "BloodBagNo": "",
+                "ConsultAppID": "",
+                "StatusCode": "RP",  # 报告完成
+                "UpdateUserCode": "AutoLoader",
+                "UpdateUserName": "AutoLoader",
+                "UpdateDateTime": update_datetime,
+                "ESOperateDeptCode": "",
+                "ESOperateDept": "",
+                "ESReportID": "",
+            }
+
+            try:
+                status_success = status_client.send_status_change(
+                    message_id=status_message_id,
+                    source_system="AutoLoader",
+                    status_params=[status_param],
+                )
+                if status_success:
+                    logger.info(
+                        f"状态变更回传成功(MES0167)，报告Id={report_id}，条码={barcode}，状态代码=RP"
+                    )
+                else:
+                    logger.error(
+                        f"状态变更回传失败(MES0167)，报告Id={report_id}，条码={barcode}，状态代码=RP"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"状态变更回传过程中发生异常(MES0167)，报告Id={report_id}，条码={barcode}，错误: {e}",
+                    exc_info=True,
+                )
+
+            # 注册及状态回传逻辑完成后，删除本地PDF文件，避免磁盘堆积
             try:
                 os.remove(filepath)
                 logger.info(f"已删除本地PDF文件: {filepath}")
@@ -349,7 +415,10 @@ def _register_document_for_report(register_client: RegisterDocumentClient, repor
             logger.error(f"文档注册失败，报告Id={report_id}，条码={barcode}")
 
     except Exception as e:
-        logger.error(f"文档注册过程中发生异常，报告Id={report_id}，条码={barcode}，错误: {e}", exc_info=True)
+        logger.error(
+            f"文档注册过程中发生异常，报告Id={report_id}，条码={barcode}，错误: {e}",
+            exc_info=True,
+        )
 
 def check_end_mark():
     """
