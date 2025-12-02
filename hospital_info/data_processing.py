@@ -59,13 +59,15 @@ def json_to_dict(json_data: str) -> dict:
 
 
 def xml_to_dict(xml_data: str) -> dict:
-    """
-    将xml格式的字符串转换为dict
-    Args:
-        xml_data: xml格式的字符串
+    """将 XML 格式的字符串转换为 dict。
 
-    Returns:
-        dict
+    说明：
+    - 这里不再启用 ``process_namespaces=True``，避免默认命名空间或前缀
+      导致标签名被替换为 ``{namespace}Response`` 之类，
+      影响后续通过 "Response"/"Body"/"ResultCode" 等简单键访问。
+    - 对于本项目对接的东华 HIS / PIS 接口，业务方文档与示例均以
+      无命名空间前缀的标签名为准，因此忽略命名空间更符合使用习惯。
     """
-    data = xmltodict.parse(xml_data, process_namespaces=True)
+    # 不处理命名空间，直接使用原始标签名作为 key，便于按文档中的字段名取值
+    data = xmltodict.parse(xml_data)
     return data

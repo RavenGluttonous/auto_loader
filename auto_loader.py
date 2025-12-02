@@ -641,6 +641,18 @@ def main():
                         continue
 
                     try:
+                        # 记录 HIS 申请信息列表接口的原始响应内容，便于对比返回体数据格式
+                        raw_xml = response.text or ""
+                        if len(raw_xml) > 2000:
+                            log_xml = raw_xml[:2000] + "...(已截断)"
+                        else:
+                            log_xml = raw_xml
+                        logger.info(f"HIS申请信息列表接口原始响应: {log_xml}")
+                    except Exception as e:
+                        # 打印原始响应不影响后续解析，异常仅记录日志
+                        logger.warning(f"记录HIS原始响应内容时发生异常: {e}")
+
+                    try:
                         xml_dict = data_processing.xml_to_dict(response.text)
                     except Exception as e:
                         logger.error(f"解析HIS返回XML失败: {str(e)}")
