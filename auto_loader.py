@@ -41,6 +41,14 @@ _XCOPE_SCANNER_CODE_QUEUE: queue.Queue[str] = queue.Queue()
 _RISR_APP_NUM_MAP_LOCK = threading.Lock()
 _RISR_APP_NUM_MAP: dict[str, str] = {}
 
+# 条码与医嘱明细ID(OEORIOrderItemID) 映射表，用于文档注册和状态变更接口
+_OEORI_ORDER_ITEM_ID_MAP_LOCK = threading.Lock()
+_OEORI_ORDER_ITEM_ID_MAP: dict[str, str] = {}
+
+# 条码与就诊流水号(PAADMVisitNumber) 映射表，用于文档注册/状态变更接口
+_PAADM_VISIT_NUMBER_MAP_LOCK = threading.Lock()
+_PAADM_VISIT_NUMBER_MAP: dict[str, str] = {}
+
 # 条码长度控制：正常条码基准长度约为 10 位，超过 1.5 倍认为可能是连续扫码被拼接
 _BARCODE_BASE_LENGTH = 10
 _BARCODE_MAX_LENGTH = int(_BARCODE_BASE_LENGTH * 1.5)  # 目前为 15
@@ -95,6 +103,44 @@ def _get_risr_app_num_for_barcode(barcode: str) -> str | None:
         return None
     with _RISR_APP_NUM_MAP_LOCK:
         return _RISR_APP_NUM_MAP.get(barcode)
+
+
+def _set_oeori_order_item_id_for_barcode(barcode: str, order_item_id: str) -> None:
+    """为给定条码记录对应的医嘱明细ID(OEORIOrderItemID)。"""
+    barcode = (barcode or "").strip()
+    order_item_id = (order_item_id or "").strip()
+    if not barcode or not order_item_id:
+        return
+    with _OEORI_ORDER_ITEM_ID_MAP_LOCK:
+        _OEORI_ORDER_ITEM_ID_MAP[barcode] = order_item_id
+
+
+def _get_oeori_order_item_id_for_barcode(barcode: str) -> str | None:
+    """根据条码获取对应的医嘱明细ID(OEORIOrderItemID)。"""
+    barcode = (barcode or "").strip()
+    if not barcode:
+        return None
+    with _OEORI_ORDER_ITEM_ID_MAP_LOCK:
+        return _OEORI_ORDER_ITEM_ID_MAP.get(barcode)
+
+
+def _set_paadm_visit_number_for_barcode(barcode: str, visit_number: str) -> None:
+    """为给定条码记录对应的就诊流水号(PAADMVisitNumber)。"""
+    barcode = (barcode or "").strip()
+    visit_number = (visit_number or "").strip()
+    if not barcode or not visit_number:
+        return
+    with _PAADM_VISIT_NUMBER_MAP_LOCK:
+        _PAADM_VISIT_NUMBER_MAP[barcode] = visit_number
+
+
+def _get_paadm_visit_number_for_barcode(barcode: str) -> str | None:
+    """根据条码获取对应的就诊流水号(PAADMVisitNumber)。"""
+    barcode = (barcode or "").strip()
+    if not barcode:
+        return None
+    with _PAADM_VISIT_NUMBER_MAP_LOCK:
+        return _PAADM_VISIT_NUMBER_MAP.get(barcode)
 
 
 def _get_last_scanner_code() -> str | None:
@@ -351,12 +397,27 @@ def _register_document_for_report(
             logger.error(f"读取 PDF 文件失败，无法进行文档注册: {filepath}, 错误: {e}")
             return
 
-        # 从 Xcope 报告 item 中尽量提取患者及就诊信息（字段名为中文，示例中采用常见字段名）
-        pat_patient_id = str(item.get("诊疗卡号") or "")
+        # 从 Xcope 报告 item / 华东申请列表 中尽量提取患者及就诊信息（字段名为中文，示例中采用常见字段名）
+        # 这里保留从报告中取出的登记号/诊疗卡号，用于后续状态变更(MES0167) 上报
+        his_pat_patient_id = str(item.get("诊疗卡号") or "")
         pat_patient_name = str(item.get("姓名") or "")
-        paadm_visit_number = str(item.get("就诊流水号") or "")
+        # PAADMVisitNumber 优先从华东申请列表(MES0201) 的映射中获取，
+        # 若未命中映射，则回退使用 Xcope 报告中可能携带的就诊流水号/PAADMVisitNumber 字段
+        paadm_visit_number = (
+            _get_paadm_visit_number_for_barcode(barcode)
+            or str(item.get("就诊流水号") or item.get("PAADMVisitNumber") or "")
+        )
         specimen_id = str(item.get("样本编号") or "")
-        oeori_order_item_id = str(item.get("医嘱ID") or "")
+        # 优先使用申请信息列表(MES0201) 中保存的 OEORIOrderItemID；
+        # 若未找到，则回退使用 Xcope 报告中可能携带的 OEORIOrderItemID/医嘱ID 字段
+        oeori_order_item_id = (
+            _get_oeori_order_item_id_for_barcode(barcode)
+            or str(item.get("OEORIOrderItemID") or item.get("医嘱ID") or "")
+        )
+
+        # 文档注册接口要求：PATPatientID 传入扫码枪扫描到的条码
+        # 若异常情况下条码为空，则回退使用报告中的登记号/诊疗卡号
+        pat_patient_id_for_register = (barcode or "").strip() or his_pat_patient_id
 
         # 如果 Xcope 返回中没有上述字段，可以根据实际字段名调整
 
@@ -373,13 +434,15 @@ def _register_document_for_report(
         success = register_client.register_document(
             message_id=message_id,
             organization_code="0001",
-            pat_patient_id=pat_patient_id,
+            # 文档注册 PATPatientID 使用扫码条码
+            pat_patient_id=pat_patient_id_for_register,
             pat_patient_name=pat_patient_name,
             paadm_visit_number=paadm_visit_number,
             specimen_id=specimen_id,
             oeori_order_item_id=oeori_order_item_id,
             document_type="02006",  # 病理报告
-            document_id=report_id,
+            # 文档注册 DocumentID 按要求传申请列表中的 PAADMVisitNumber（就诊流水号）
+            document_id=paadm_visit_number,
             document_content_base64=document_content_base64,
             document_path=document_path,
             document_pic_path="",  # 如有需要可根据实际情况填写
@@ -422,7 +485,8 @@ def _register_document_for_report(
                 pass
 
             status_param = {
-                "PATPatientID": pat_patient_id,
+                # 状态变更 PATPatientID 也改为扫码条码，异常时回退登记号/诊疗卡号
+                "PATPatientID": pat_patient_id_for_register,
                 "PAADMVisitNumber": paadm_visit_number,
                 "OEORIOrderItemID": oeori_order_item_id,
                 "OEORIOrdExecID": "",
@@ -432,11 +496,11 @@ def _register_document_for_report(
                 "Position": "",
                 "OperAppID": "",
                 "BloodAppID": "",
-	                "BloodBagNo": "",
-	                "ConsultAppID": "",
-	                "StatusCode": "RP",  # 报告完成
-	                "UpdateUserCode": update_user_code,
-	                "UpdateUserName": update_user_name,
+                "BloodBagNo": "",
+                "ConsultAppID": "",
+                "StatusCode": "RP",  # 报告完成
+                "UpdateUserCode": update_user_code,
+                "UpdateUserName": update_user_name,
                 "UpdateDateTime": update_datetime,
                 "ESOperateDeptCode": "",
                 "ESOperateDept": "",
@@ -698,6 +762,16 @@ def main():
                     app_num = str(first_order.get("RISRAppNum") or "").strip()
                     if app_num:
                         _set_risr_app_num_for_barcode(scanner_result, app_num)
+
+                    # 记录当前条码对应的医嘱明细ID(OEORIOrderItemID)
+                    order_item_id = str(first_order.get("OEORIOrderItemID") or "").strip()
+                    if order_item_id:
+                        _set_oeori_order_item_id_for_barcode(scanner_result, order_item_id)
+
+                    # 记录当前条码对应的就诊流水号(PAADMVisitNumber)
+                    visit_number = str(first_order.get("PAADMVisitNumber") or "").strip()
+                    if visit_number:
+                        _set_paadm_visit_number_for_barcode(scanner_result, visit_number)
 
                     xcope_xm = first_order.get("PATName") or ""
                     xcope_nl = first_order.get("PATAge") or ""
