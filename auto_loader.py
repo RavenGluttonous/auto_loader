@@ -527,12 +527,8 @@ def _register_document_for_report(
                     exc_info=True,
                 )
 
-            # 注册及状态回传逻辑完成后，删除本地PDF文件，避免磁盘堆积
-            try:
-                os.remove(filepath)
-                logger.info(f"已删除本地PDF文件: {filepath}")
-            except OSError as oe:
-                logger.warning(f"删除本地PDF文件失败: {filepath}，错误: {oe}")
+	            # 原逻辑：注册及状态回传完成后删除本地 PDF，避免磁盘堆积
+	            # 现按医院要求改为保留本地 PDF 文件，不再执行删除操作
         else:
             logger.error(f"文档注册失败，报告Id={report_id}，条码={barcode}")
 
@@ -669,10 +665,11 @@ def main():
         <MessageID>{serial_number}</MessageID>
     </Header>
     <Body>
-        <CardValue>{scanner_result}</CardValue>
-        <CardTypes>2</CardTypes>
-        <ExeLoc>静秀路病理科</ExeLoc>
-        <EpsiodeType>I</EpsiodeType>
+        <CardValue></CardValue>
+        <CardTypes></CardTypes>
+        <ExeLoc></ExeLoc>
+        <EpsiodeType></EpsiodeType>
+        <AppNum>{scanner_result}</AppNum>
     </Body>
 </Request>"""
 
