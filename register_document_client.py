@@ -10,7 +10,7 @@ class RegisterDocumentClient:
     def __init__(
         self,
         service_url: str = "https://192.168.206.193:1443/csp/hsb/DHC.Published.PISWebService.BS.PISWebService.CLS",
-        service_code: str = "MES0017",  # 文档注册服务编码
+        service_code: str = "MES0169",  # 文档注册服务编码
     ) -> None:
         self.service_url = service_url
         self.service_code = service_code
