@@ -330,7 +330,8 @@ def _register_document_for_report(
 
     当前实现：
     - 使用 Xcope 报告 Id 作为 DocumentID
-    - 使用本地 PDF 路径作为 DocumentPath（后续可根据医院平台要求改为HTTP地址）
+    - DocumentPath 使用固定前缀 + PDF 文件名，例如：
+      http://192.168.206.174/blk/pathology/report/202509055.pdf
     - 其他字段从 item 中尽量提取，如获取不到则置空
     - 文档注册成功后，调用 MES0167 状态变更回传接口，上报状态代码 RP（报告完成）
     """
@@ -359,6 +360,16 @@ def _register_document_for_report(
 
         # 如果 Xcope 返回中没有上述字段，可以根据实际字段名调整
 
+        # DocumentPath 按医院要求：固定前缀 + PDF 文件名
+        # 例如：http://192.168.206.174/blk/pathology/report/202509055.pdf
+        filename_only = os.path.basename(filepath)
+        base_url = "http://192.168.206.174/blk/pathology/report/"
+        if filename_only:
+            document_path = base_url.rstrip("/") + "/" + filename_only
+        else:
+            # 异常情况下退回使用前缀本身
+            document_path = base_url.rstrip("/")
+
         success = register_client.register_document(
             message_id=message_id,
             organization_code="0001",
@@ -370,7 +381,7 @@ def _register_document_for_report(
             document_type="02006",  # 病理报告
             document_id=report_id,
             document_content_base64=document_content_base64,
-            document_path=filepath,
+            document_path=document_path,
             document_pic_path="",  # 如有需要可根据实际情况填写
             update_user_code="AutoLoader",
             update_date=update_date,
@@ -435,7 +446,7 @@ def _register_document_for_report(
             try:
                 status_success = status_client.send_status_change(
                     message_id=status_message_id,
-                    source_system="AutoLoader",
+                    source_system="02",
                     status_params=[status_param],
                 )
                 if status_success:
@@ -683,18 +694,19 @@ def main():
                     else:
                         first_order = pat_ord_lists
 
-	                    # 记录当前条码对应的申请单号(RISRAppNum)
+                    # 记录当前条码对应的申请单号(RISRAppNum)
                     app_num = str(first_order.get("RISRAppNum") or "").strip()
                     if app_num:
                         _set_risr_app_num_for_barcode(scanner_result, app_num)
-	
+
                     xcope_xm = first_order.get("PATName") or ""
                     xcope_nl = first_order.get("PATAge") or ""
                     # 这里优先使用登记号作为诊疗卡号，如有需要可根据医院要求调整
-                    xcope_zlkh = first_order.get("PATPatientID") or first_order.get("PAADMVisitNumber") or ""
+                    xcope_zlkh = first_order.get("RISRAppNum") or first_order.get("PAADMVisitNumber") or ""
                     xcope_sjys = first_order.get("RISRSubmitDocDesc") or ""
                     xcope_sjks = first_order.get("AppDeptDesc") or ""
-                    xcope_ybbh = f"M{current_time[:4]}{str(current_patient['serial_number']).zfill(5)}"
+                    # 样本编号改为使用扫码枪获取的条码
+                    xcope_ybbh = scanner_result
 
                     try:
                         auto_input.xcope.xcope_input(

@@ -32,7 +32,7 @@ class RegisterDocumentClient:
         update_user_code: str,
         update_date: str,
         update_time: str,
-        source_system: str = "AutoLoader",
+        source_system: str = "02",
     ) -> bool:
         """调用文档注册接口。
 
@@ -40,6 +40,7 @@ class RegisterDocumentClient:
         """
 
         # 内部业务 XML，请求结构与东华《文档注册》接口文档一致
+        # 注意：按医院当前要求，DocumentContent 节点留空，不上传 PDF Base64 内容。
         request_xml = f"""<Request>
     <Header>
         <SourceSystem>{source_system}</SourceSystem>
@@ -56,7 +57,7 @@ class RegisterDocumentClient:
             <OEORIOrderItemID>{oeori_order_item_id}</OEORIOrderItemID>
             <DocumentType>{document_type}</DocumentType>
             <DocumentID>{document_id}</DocumentID>
-            <DocumentContent>{document_content_base64}</DocumentContent>
+            <DocumentContent></DocumentContent>
             <DocumentPath>{document_path}</DocumentPath>
             <DocumentPicPath>{document_pic_path}</DocumentPicPath>
             <UpdateUserCode>{update_user_code}</UpdateUserCode>
@@ -76,6 +77,34 @@ class RegisterDocumentClient:
       </dhcc:HIPMessageServer>
    </soapenv:Body>
 </soapenv:Envelope>"""
+
+        # 记录文档注册接口的输入参数和完整 SOAP 报文，便于与对方示例对比
+        try:
+            logger.info(
+                "文档注册接口请求参数: MessageID=%s, OrganizationCode=%s, PATPatientID=%s, "
+                "PATPatientName=%s, PAADMVisitNumber=%s, SpecimenID=%s, OEORIOrderItemID=%s, "
+                "DocumentType=%s, DocumentID=%s, DocumentPath=%s, DocumentPicPath=%s, "
+                "UpdateUserCode=%s, UpdateDate=%s, UpdateTime=%s, SourceSystem=%s",
+                message_id,
+                organization_code,
+                pat_patient_id,
+                pat_patient_name,
+                paadm_visit_number,
+                specimen_id,
+                oeori_order_item_id,
+                document_type,
+                document_id,
+                document_path,
+                document_pic_path,
+                update_user_code,
+                update_date,
+                update_time,
+                source_system,
+            )
+            logger.info("文档注册接口 SOAP 请求报文: %s", soap_envelope)
+        except Exception:
+            # 日志记录本身不影响业务流程
+            pass
 
         headers = {
             "Content-Type": "text/xml; charset=utf-8",
@@ -101,6 +130,12 @@ class RegisterDocumentClient:
         if resp is None:
             logger.error("调用文档注册接口失败，响应为空")
             return False
+
+        # 记录文档注册接口的原始 HTTP 响应体，便于与对方示例对比
+        try:
+            logger.info("文档注册接口 HTTP 响应内容: %s", resp.text)
+        except Exception:
+            pass
 
         try:
             response_node = data_processing.parse_dhcc_hip_response(resp.text)

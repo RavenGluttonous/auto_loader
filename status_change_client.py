@@ -115,6 +115,19 @@ class StatusChangeClient:
    </soapenv:Body>
 </soapenv:Envelope>"""
 
+        # 记录状态变更接口的输入参数和完整 SOAP 报文，便于与对方示例对比
+        try:
+            logger.info(
+                "状态变更接口请求参数: MessageID=%s, SourceSystem=%s, StatusParams=%s",
+                message_id,
+                source_system,
+                status_params,
+            )
+            logger.info("状态变更接口 SOAP 请求报文: %s", soap_envelope)
+        except Exception:
+            # 日志记录本身不影响业务流程
+            pass
+
         headers = {
             "Content-Type": "text/xml; charset=utf-8",
             # SOAP 1.1 规范要求的 SOAPAction 头，按照命名空间 + 方法名约定
@@ -139,6 +152,12 @@ class StatusChangeClient:
         if resp is None:
             logger.error("调用状态变更回传接口失败，响应为空")
             return False
+
+        # 记录状态变更接口的原始 HTTP 响应体，便于与对方示例对比
+        try:
+            logger.info("状态变更接口 HTTP 响应内容: %s", resp.text)
+        except Exception:
+            pass
 
         try:
             response_node = data_processing.parse_dhcc_hip_response(resp.text)
