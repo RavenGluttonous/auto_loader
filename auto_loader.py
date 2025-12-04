@@ -776,8 +776,8 @@ def main():
                     xcope_zlkh = first_order.get("RISRAppNum") or first_order.get("PAADMVisitNumber") or ""
                     xcope_sjys = first_order.get("RISRSubmitDocDesc") or ""
                     xcope_sjks = first_order.get("AppDeptDesc") or ""
-                    # 样本编号改为使用扫码枪获取的条码
-                    xcope_ybbh = scanner_result
+                    # 样本编号改为使用医嘱明细ID
+                    xcope_ybbh = order_item_id or scanner_result
 
                     try:
                         auto_input.xcope.xcope_input(
