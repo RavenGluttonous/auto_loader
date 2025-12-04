@@ -49,8 +49,8 @@ _OEORI_ORDER_ITEM_ID_MAP: dict[str, str] = {}
 _PAADM_VISIT_NUMBER_MAP_LOCK = threading.Lock()
 _PAADM_VISIT_NUMBER_MAP: dict[str, str] = {}
 
-# 条码长度控制：正常条码基准长度约为 10 位，超过 1.5 倍认为可能是连续扫码被拼接
-_BARCODE_BASE_LENGTH = 10
+# 条码长度控制：正常条码基准长度约为 17 位，超过 1.5 倍认为可能是连续扫码被拼接
+_BARCODE_BASE_LENGTH = 17
 _BARCODE_MAX_LENGTH = int(_BARCODE_BASE_LENGTH * 1.5)  # 目前为 15
 
 from window.prompt_dialog_box import error_window
