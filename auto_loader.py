@@ -424,7 +424,7 @@ def _register_document_for_report(
         # DocumentPath 按医院要求：固定前缀 + PDF 文件名
         # 例如：http://192.168.206.174/blk/pathology/report/202509055.pdf
         filename_only = os.path.basename(filepath)
-        base_url = "http://192.168.206.174/blk/pathology/report/"
+        base_url = "http://192.168.205.105/ygbl/"
         if filename_only:
             document_path = base_url.rstrip("/") + "/" + filename_only
         else:
