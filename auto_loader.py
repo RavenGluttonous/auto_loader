@@ -49,6 +49,10 @@ _OEORI_ORDER_ITEM_ID_MAP: dict[str, str] = {}
 _PAADM_VISIT_NUMBER_MAP_LOCK = threading.Lock()
 _PAADM_VISIT_NUMBER_MAP: dict[str, str] = {}
 
+# 条码与患者主索引(PATPatientID) 映射表，用于文档注册/状态变更接口
+_PAT_PATIENT_ID_MAP_LOCK = threading.Lock()
+_PAT_PATIENT_ID_MAP: dict[str, str] = {}
+
 # 条码长度控制：正常条码基准长度约为 17 位，超过 1.5 倍认为可能是连续扫码被拼接
 _BARCODE_BASE_LENGTH = 17
 _BARCODE_MAX_LENGTH = int(_BARCODE_BASE_LENGTH * 1.5)  # 目前为 15
@@ -141,6 +145,25 @@ def _get_paadm_visit_number_for_barcode(barcode: str) -> str | None:
         return None
     with _PAADM_VISIT_NUMBER_MAP_LOCK:
         return _PAADM_VISIT_NUMBER_MAP.get(barcode)
+
+
+def _set_pat_patient_id_for_barcode(barcode: str, patient_id: str) -> None:
+    """为给定条码记录对应的患者主索引(PATPatientID)。"""
+    barcode = (barcode or "").strip()
+    patient_id = (patient_id or "").strip()
+    if not barcode or not patient_id:
+        return
+    with _PAT_PATIENT_ID_MAP_LOCK:
+        _PAT_PATIENT_ID_MAP[barcode] = patient_id
+
+
+def _get_pat_patient_id_for_barcode(barcode: str) -> str | None:
+    """根据条码获取对应的患者主索引(PATPatientID)。"""
+    barcode = (barcode or "").strip()
+    if not barcode:
+        return None
+    with _PAT_PATIENT_ID_MAP_LOCK:
+        return _PAT_PATIENT_ID_MAP.get(barcode)
 
 
 def _get_last_scanner_code() -> str | None:
@@ -256,9 +279,11 @@ def _xcope_poll_worker() -> None:
             matched_barcodes: list[str] = []
 
             def _extract_sample_code(report_item: dict) -> str:
-                """从 Xcope 报告中提取用于精确匹配条码的样本编号/标本编号等字段。"""
-                for key in ("样本编号", "标本编号", "样本号", "标本号"):
+                """从 Xcope 报告中提取用于精确匹配条码的诊疗卡号（优先）或样本编号等字段。"""
+                # 优先使用诊疗卡号相关字段进行匹配
+                for key in ("诊疗卡号", "就诊卡号"):
                     value = str(report_item.get(key) or "").strip()
+                    logger.info(f"尝试从 Xcope 报告中提取诊疗卡号: {key} = {value}")
                     if value:
                         return value
                 return ""
@@ -287,8 +312,8 @@ def _xcope_poll_worker() -> None:
                     logger.warning(f"匹配到的 Xcope 报告缺少 Id 字段，条码={barcode}")
                     continue
 
-                # 优先使用申请信息列表接口返回的申请单号(RISRAppNum)作为 PDF 文件名；
-                # 如未能获取申请单号，则回退为样本编号，再回退为报告 Id
+	            # 优先使用申请信息列表接口返回的申请单号(RISRAppNum)作为 PDF 文件名；
+	            # 如未能获取申请单号，则回退为诊疗卡号/样本编号，再回退为报告 Id
                 app_num_for_filename = _get_risr_app_num_for_barcode(barcode)
                 if app_num_for_filename:
                     filename_base = app_num_for_filename
@@ -415,9 +440,13 @@ def _register_document_for_report(
             or str(item.get("OEORIOrderItemID") or item.get("医嘱ID") or "")
         )
 
-        # 文档注册接口要求：PATPatientID 传入扫码枪扫描到的条码
-        # 若异常情况下条码为空，则回退使用报告中的登记号/诊疗卡号
-        pat_patient_id_for_register = (barcode or "").strip() or his_pat_patient_id
+	    # 文档注册接口 PATPatientID 优先使用申请信息列表(MES0201) 中的 PATPatientID；
+	    # 若未获取到，则回退使用报告中的登记号/诊疗卡号，仍为空时再回退为扫码条码本身
+        pat_patient_id_for_register = (
+	        _get_pat_patient_id_for_barcode(barcode)
+	        or his_pat_patient_id
+	        or (barcode or "").strip()
+	    )
 
         # 如果 Xcope 返回中没有上述字段，可以根据实际字段名调整
 
@@ -769,6 +798,11 @@ def main():
                     visit_number = str(first_order.get("PAADMVisitNumber") or "").strip()
                     if visit_number:
                         _set_paadm_visit_number_for_barcode(scanner_result, visit_number)
+
+                    # 记录当前条码对应的患者主索引(PATPatientID)
+                    pat_patient_id = str(first_order.get("PATPatientID") or "").strip()
+                    if pat_patient_id:
+                        _set_pat_patient_id_for_barcode(scanner_result, pat_patient_id)
 
                     xcope_xm = first_order.get("PATName") or ""
                     xcope_nl = first_order.get("PATAge") or ""

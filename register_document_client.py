@@ -53,7 +53,7 @@ class RegisterDocumentClient:
             <PATPatientName>{pat_patient_name}</PATPatientName>
             <PAADMVisitNumber>{paadm_visit_number}</PAADMVisitNumber>
             <RISRExamID>{document_id}</RISRExamID>
-            <SpecimenID>{specimen_id}</SpecimenID>
+            <SpecimenID/>
             <OEORIOrderItemID>{oeori_order_item_id}</OEORIOrderItemID>
             <DocumentType>{document_type}</DocumentType>
             <DocumentID>{document_id}</DocumentID>
