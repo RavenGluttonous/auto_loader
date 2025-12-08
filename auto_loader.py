@@ -21,6 +21,7 @@ import tray_task.tray_task
 from hospital_info import data_processing
 from utils import http_request
 from utils import logger  # 导入新的日志模块
+from utils.message_id import generate_message_id
 from xcope_client import XcopeClient
 from register_document_client import RegisterDocumentClient
 from status_change_client import StatusChangeClient
@@ -409,7 +410,8 @@ def _register_document_for_report(
     try:
         # 生成消息ID、日期、时间
         now = datetime.datetime.now()
-        message_id = f"REG-{now.strftime('%Y%m%d%H%M%S')}-{report_id}"
+        # Use 16-digit unique numeric MessageID for RegisterDocument Header.MessageID
+        message_id = generate_message_id()
         update_date = now.strftime("%Y-%m-%d")
         update_time = now.strftime("%H:%M:%S")
 
@@ -440,13 +442,13 @@ def _register_document_for_report(
             or str(item.get("OEORIOrderItemID") or item.get("医嘱ID") or "")
         )
 
-	    # 文档注册接口 PATPatientID 优先使用申请信息列表(MES0201) 中的 PATPatientID；
-	    # 若未获取到，则回退使用报告中的登记号/诊疗卡号，仍为空时再回退为扫码条码本身
+        # 文档注册接口 PATPatientID 优先使用申请信息列表(MES0201) 中的 PATPatientID；
+        # 若未获取到，则回退使用报告中的登记号/诊疗卡号，仍为空时再回退为扫码条码本身
         pat_patient_id_for_register = (
-	        _get_pat_patient_id_for_barcode(barcode)
-	        or his_pat_patient_id
-	        or (barcode or "").strip()
-	    )
+            _get_pat_patient_id_for_barcode(barcode)
+            or his_pat_patient_id
+            or (barcode or "").strip()
+        )
 
         # 如果 Xcope 返回中没有上述字段，可以根据实际字段名调整
 
@@ -484,7 +486,8 @@ def _register_document_for_report(
             logger.info(f"文档注册成功，报告Id={report_id}，条码={barcode}")
 
             # 文档注册成功后，按病理闭环要求回传状态变更（MES0167），状态代码示例使用 RP（报告完成）
-            status_message_id = f"STS-{now.strftime('%Y%m%d%H%M%S')}-{report_id}"
+            # 为状态变更回传生成 16 位唯一 MessageID（纯数字）
+            status_message_id = generate_message_id()
             update_datetime = now.strftime("%Y-%m-%d %H:%M:%S")
 
             # 尝试从 Xcope 报告中获取检查号等字段，如无对应字段可按实际医院字段名调整
@@ -539,7 +542,7 @@ def _register_document_for_report(
             try:
                 status_success = status_client.send_status_change(
                     message_id=status_message_id,
-                    source_system="02",
+                    source_system="ygbl",
                     status_params=[status_param],
                 )
                 if status_success:
@@ -556,8 +559,8 @@ def _register_document_for_report(
                     exc_info=True,
                 )
 
-	            # 原逻辑：注册及状态回传完成后删除本地 PDF，避免磁盘堆积
-	            # 现按医院要求改为保留本地 PDF 文件，不再执行删除操作
+            # 原逻辑：注册及状态回传完成后删除本地 PDF，避免磁盘堆积
+            # 现按医院要求改为保留本地 PDF 文件，不再执行删除操作
         else:
             logger.error(f"文档注册失败，报告Id={report_id}，条码={barcode}")
 
@@ -686,12 +689,15 @@ def main():
                     serial_number = f"{current_time}S{str(current_patient['serial_number']).zfill(6)}"
                     logger.info(f"生成新序列号: {serial_number}")
 
+                    # 生成 16 位唯一 MessageID（纯数字），用于 HIS 接口 Header.MessageID
+                    message_id = generate_message_id()
+
                     # 调用东华 MES0201 接口（申请信息列表）获取患者信息
                     # 按对方在 SoapUI 中通过测试的示例，先构造内部业务 XML，再封装到 SOAP Envelope 中
                     request_xml = f"""<Request>
     <Header>
-        <SourceSystem>RuiKe</SourceSystem>
-        <MessageID>{serial_number}</MessageID>
+        <SourceSystem>ygbl</SourceSystem>
+        <MessageID>{message_id}</MessageID>
     </Header>
     <Body>
         <CardValue></CardValue>
@@ -820,17 +826,25 @@ def main():
                             zlkh=xcope_zlkh,
                             sjys=xcope_sjys,
                             sjks=xcope_sjks,
-                            ybbh=xcope_ybbh
+                            ybbh=xcope_ybbh,
                         )
                         logger.info(f"自动填表成功: {xcope_xm}")
                     except FailSafeException:
                         logger.warning("自动填表过程中检测到鼠标移动到屏幕角落")
-                        error_window("自动输入过程，鼠标光标请不要移动到屏幕的四个角落，请移动回正确位置再重新扫描。", 900, 300)
+                        error_window(
+                            "自动输入过程，鼠标光标请不要移动到屏幕的四个角落，请移动回正确位置再重新扫描。",
+                            900,
+                            300,
+                        )
                         continue
 
                 except Exception as e:
                     logger.error(f"处理体检系统条码异常: {str(e)}", exc_info=True)
-                    error_window(f"处理体检系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}", 500, 180)
+                    error_window(
+                        f"处理体检系统条码异常，请重试\n条码: {scanner_result}\n异常信息: {str(e)}",
+                        500,
+                        180,
+                    )
 
             except FailSafeException:
                 logger.warning("触发PyAutoGUI故障安全异常 - 鼠标移动到屏幕角落")

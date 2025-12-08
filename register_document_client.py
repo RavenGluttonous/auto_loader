@@ -30,10 +30,10 @@ class RegisterDocumentClient:
         document_path: str,
         document_pic_path: str,
         update_user_code: str,
-        update_date: str,
-        update_time: str,
-        source_system: str = "02",
-    ) -> bool:
+	    update_date: str,
+	    update_time: str,
+	    source_system: str = "ygbl",
+	    ) -> bool:
         """调用文档注册接口。
 
         返回 True 表示 ResultCode == "0"。

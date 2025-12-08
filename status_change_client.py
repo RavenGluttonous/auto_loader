@@ -23,8 +23,8 @@ class StatusChangeClient:
     def send_status_change(
         self,
         message_id: str,
-        source_system: str,
         status_params: list[dict],
+        source_system: str = "ygbl",
     ) -> bool:
         """发送 1..N 条状态变更请求。
 
